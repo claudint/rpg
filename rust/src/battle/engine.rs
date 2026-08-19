@@ -10,6 +10,28 @@ use super::pattern::{self, Pattern};
 /// Plateau 3x4 par camp (specs, section 3.3).
 pub const BOARD_BOUNDS: GridBounds = GridBounds { width: 3, height: 4 };
 
+/// Les deux plateaux mis bout à bout (le bord droit du plateau joueur touche
+/// le bord gauche du plateau ennemi) : un sort de zone ancré près de cette
+/// frontière peut donc toucher les deux camps, comme si les plateaux étaient
+/// collés l'un à l'autre.
+pub const COMBINED_BOUNDS: GridBounds = GridBounds { width: BOARD_BOUNDS.width * 2, height: BOARD_BOUNDS.height };
+
+pub fn to_combined(pos: BoardPos) -> GridPos {
+    let x = match pos.side {
+        Side::Player => pos.cell.x,
+        Side::Enemy => BOARD_BOUNDS.width + pos.cell.x,
+    };
+    GridPos::new(x, pos.cell.y)
+}
+
+pub fn from_combined(pos: GridPos) -> BoardPos {
+    if pos.x < BOARD_BOUNDS.width {
+        BoardPos { side: Side::Player, cell: pos }
+    } else {
+        BoardPos { side: Side::Enemy, cell: GridPos::new(pos.x - BOARD_BOUNDS.width, pos.y) }
+    }
+}
+
 pub type UnitId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,31 +116,24 @@ impl BattleState {
         self.spells.get(id)
     }
 
-    /// Applique un sort lancé par `caster` sur la zone ancrée en `target_cell`.
+    /// Applique un sort ancré en `target_cell`. La géométrie seule décide qui
+    /// est touché : les deux plateaux sont traités comme collés l'un à
+    /// l'autre (`to_combined`), donc un sort de zone ancré près de la
+    /// frontière peut toucher des unités des deux camps, y compris des
+    /// alliés du lanceur (et le lanceur lui-même). `Spell::target` ne sert
+    /// qu'à valider quel plateau on a le droit de viser (voir
+    /// `battle::scene`), pas à filtrer les dégâts après coup.
     /// Retourne les unités touchées.
-    pub fn resolve_action(&mut self, caster: UnitId, spell_id: &str, target_cell: BoardPos) -> Vec<UnitId> {
+    pub fn resolve_action(&mut self, spell_id: &str, target_cell: BoardPos) -> Vec<UnitId> {
         let Some(spell) = self.spells.get(spell_id) else {
             return Vec::new();
         };
         let power = spell.power;
-        let target_kind = spell.target;
-        let affected_cells = pattern::cells(target_cell.cell, spell.pattern, BOARD_BOUNDS);
-        let caster_side = self.units[caster].side;
+        let affected = pattern::cells(to_combined(target_cell), spell.pattern, COMBINED_BOUNDS);
 
         let mut hit_ids = Vec::new();
         for (id, unit) in self.units.iter_mut().enumerate() {
-            if !unit.is_alive() || unit.pos.side != target_cell.side {
-                continue;
-            }
-            if !affected_cells.contains(&unit.pos.cell) {
-                continue;
-            }
-            let is_ally_of_caster = unit.side == caster_side;
-            let matches_target = match target_kind {
-                TargetKind::Ally => is_ally_of_caster,
-                TargetKind::Enemy => !is_ally_of_caster,
-            };
-            if !matches_target {
+            if !unit.is_alive() || !affected.contains(&to_combined(unit.pos)) {
                 continue;
             }
 
@@ -199,7 +214,7 @@ mod tests {
         let mut state = BattleState::new(units, vec![strike_spell()]);
 
         let target = BoardPos { side: Side::Enemy, cell: GridPos::new(1, 1) };
-        let hit = state.resolve_action(0, "strike", target);
+        let hit = state.resolve_action("strike", target);
 
         assert_eq!(hit, vec![1]);
         assert_eq!(state.unit(1).hp, 7);
@@ -231,7 +246,54 @@ mod tests {
         assert_eq!(state.outcome(), None);
 
         let target = BoardPos { side: Side::Enemy, cell: GridPos::new(0, 0) };
-        state.resolve_action(0, "strike", target);
+        state.resolve_action("strike", target);
         assert_eq!(state.outcome(), Some(Outcome::Victory));
+    }
+
+    #[test]
+    fn zone_spell_splashes_across_the_board_boundary() {
+        let cross_spell = Spell {
+            id: "boule".to_string(),
+            name: "Boule".to_string(),
+            power: -5,
+            target: TargetKind::Enemy,
+            pattern: Pattern::Cross(1),
+        };
+        let units = vec![
+            unit("Mage", Side::Player, 2, 1, 20, 10, &["boule"]), // colonne 2 = 1re ligne joueur
+            unit("Gobelin", Side::Enemy, 0, 1, 15, 5, &["boule"]), // colonne 0 = 1re ligne ennemie, juste en face
+        ];
+        let mut state = BattleState::new(units, vec![cross_spell]);
+
+        // Le mage vise le gobelin juste en face, à la frontière des deux plateaux.
+        let target = BoardPos { side: Side::Enemy, cell: GridPos::new(0, 1) };
+        let hit = state.resolve_action("boule", target);
+
+        assert!(hit.contains(&0), "le mage se prend l'explosion en pleine face, les plateaux sont collés");
+        assert!(hit.contains(&1));
+        assert_eq!(state.unit(0).hp, 15);
+        assert_eq!(state.unit(1).hp, 10);
+    }
+
+    #[test]
+    fn zone_spell_does_not_splash_when_anchored_away_from_boundary() {
+        let cross_spell = Spell {
+            id: "boule".to_string(),
+            name: "Boule".to_string(),
+            power: -5,
+            target: TargetKind::Enemy,
+            pattern: Pattern::Cross(1),
+        };
+        let units = vec![
+            unit("Mage", Side::Player, 0, 1, 20, 10, &["boule"]), // colonne 0 = dernière ligne joueur, loin de la frontière
+            unit("Gobelin", Side::Enemy, 2, 1, 15, 5, &["boule"]), // colonne 2 = dernière ligne ennemie, loin aussi
+        ];
+        let mut state = BattleState::new(units, vec![cross_spell]);
+
+        let target = BoardPos { side: Side::Enemy, cell: GridPos::new(2, 1) };
+        let hit = state.resolve_action("boule", target);
+
+        assert_eq!(hit, vec![1]);
+        assert_eq!(state.unit(0).hp, 20); // trop loin de la frontière pour être touché
     }
 }

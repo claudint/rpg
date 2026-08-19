@@ -268,17 +268,16 @@ impl BattleScene {
                 return;
             }
 
-            (caster_id, spell_id)
+            spell_id
         };
 
-        let (caster_id, spell_id) = action;
-        self.resolve_and_advance(caster_id, &spell_id, target);
+        self.resolve_and_advance(&action, target);
         self.drive_until_player_or_end();
     }
 
-    fn resolve_and_advance(&mut self, caster_id: UnitId, spell_id: &str, target: BoardPos) {
+    fn resolve_and_advance(&mut self, spell_id: &str, target: BoardPos) {
         if let Phase::Fight { battle, pending_spell, .. } = &mut self.phase {
-            battle.resolve_action(caster_id, spell_id, target);
+            battle.resolve_action(spell_id, target);
             battle.advance_turn();
             *pending_spell = None;
         }
@@ -343,12 +342,12 @@ impl BattleScene {
                     return None;
                 }
                 let index = ((randf() * candidates.len() as f64) as usize).min(candidates.len() - 1);
-                Some((caster_id, spell_id, BoardPos { side: target_side, cell: candidates[index] }))
+                Some((spell_id, BoardPos { side: target_side, cell: candidates[index] }))
             })
         };
 
         match action {
-            Some((caster_id, spell_id, target)) => self.resolve_and_advance(caster_id, &spell_id, target),
+            Some((spell_id, target)) => self.resolve_and_advance(&spell_id, target),
             None => {
                 self.advance_turn_only();
                 self.update_unit_labels();
@@ -558,25 +557,26 @@ impl BattleScene {
         }
     }
 
+    /// Prévisualisation des cases touchées (specs, section 3.3), calculée
+    /// dans l'espace combiné des deux plateaux : elle montre donc aussi le
+    /// débordement d'un sort de zone ancré près de la frontière commune.
     fn draw_hover_preview(&mut self) {
-        let preview: Option<(Side, Vec<GridPos>)> = match &self.phase {
+        let cells: Vec<BoardPos> = match &self.phase {
             Phase::Fight { battle, pending_spell: Some(spell_id), hover: Some(hover), .. } => battle
                 .spell(spell_id)
-                .map(|spell| (hover.side, pattern::cells(hover.cell, spell.pattern, BOARD_BOUNDS))),
-            _ => None,
+                .map(|spell| {
+                    pattern::cells(engine::to_combined(*hover), spell.pattern, engine::COMBINED_BOUNDS)
+                        .into_iter()
+                        .map(engine::from_combined)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
 
-        let Some((side, cells)) = preview else {
-            return;
-        };
-        let origin = board_origin(side);
         let overlay = Color::from_rgba(1.0, 1.0, 0.3, 0.4);
-
-        for cell in cells {
-            let rect = Rect2::new(
-                origin + Vector2::new(cell.x as f32 * CELL, cell.y as f32 * CELL),
-                Vector2::new(CELL, CELL),
-            );
+        for pos in cells {
+            let rect = Rect2::new(cell_screen_pos(pos), Vector2::new(CELL, CELL));
             self.base_mut().draw_rect(rect, overlay);
         }
     }
