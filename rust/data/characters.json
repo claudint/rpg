@@ -1,0 +1,5 @@
+[
+  { "name": "Chevalier", "hp": 30, "speed": 8, "spell_ids": ["coup_epee"] },
+  { "name": "Archère", "hp": 20, "speed": 12, "spell_ids": ["tir_arc"] },
+  { "name": "Mage", "hp": 18, "speed": 9, "spell_ids": ["boule_de_feu"] }
+]

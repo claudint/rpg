@@ -5,17 +5,7 @@
 //! tourner exactement ce code côté serveur headless (multijoueur) sans rien
 //! réécrire (voir specs-jeu-rpg-tactique.md, section 8).
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GridPos {
-    pub x: i32,
-    pub y: i32,
-}
-
-impl GridPos {
-    pub fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
+pub use crate::geometry::{GridBounds, GridPos};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -33,18 +23,6 @@ impl Direction {
             Direction::Left => (-1, 0),
             Direction::Right => (1, 0),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GridBounds {
-    pub width: i32,
-    pub height: i32,
-}
-
-impl GridBounds {
-    pub fn contains(self, pos: GridPos) -> bool {
-        pos.x >= 0 && pos.x < self.width && pos.y >= 0 && pos.y < self.height
     }
 }
 

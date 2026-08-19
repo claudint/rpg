@@ -1,0 +1,4 @@
+[
+  { "name": "Gobelin", "hp": 15, "speed": 6, "spell_ids": ["griffure"] },
+  { "name": "Gobelin", "hp": 15, "speed": 7, "spell_ids": ["griffure"] }
+]

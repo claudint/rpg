@@ -1,0 +1,6 @@
+[
+  { "id": "coup_epee", "name": "Coup d'épée", "power": -8, "target": "Enemy", "pattern": "Single" },
+  { "id": "tir_arc", "name": "Tir à l'arc", "power": -6, "target": "Enemy", "pattern": "Single" },
+  { "id": "boule_de_feu", "name": "Boule de feu", "power": -5, "target": "Enemy", "pattern": { "Cross": 1 } },
+  { "id": "griffure", "name": "Griffure", "power": -5, "target": "Enemy", "pattern": "Single" }
+]
