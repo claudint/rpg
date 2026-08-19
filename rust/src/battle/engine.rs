@@ -166,7 +166,28 @@ impl BattleState {
             None
         }
     }
+
+    /// Récompenses de victoire (specs, section 6 étape 5 : "même basique").
+    /// Le tirage du butin lui-même (aléatoire) reste côté `battle::scene`,
+    /// qui a accès au RNG de Godot ; cette méthode reste pure.
+    pub fn victory_rewards(&self) -> Rewards {
+        let enemy_count = self.units.iter().filter(|u| u.side == Side::Enemy).count() as i32;
+        Rewards { xp: enemy_count * XP_PER_ENEMY, gold: enemy_count * GOLD_PER_ENEMY }
+    }
 }
+
+const XP_PER_ENEMY: i32 = 15;
+const GOLD_PER_ENEMY: i32 = 10;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Rewards {
+    pub xp: i32,
+    pub gold: i32,
+}
+
+/// Butin possible en fin de combat : pure saveur pour l'instant, aucun
+/// inventaire pour le stocker (ça viendra avec la Phase 2 et la sauvegarde).
+pub const LOOT_TABLE: &[&str] = &["Potion de soin", "Petite bourse", "Fragment de minerai", "Vieille carte"];
 
 #[cfg(test)]
 mod tests {
@@ -248,6 +269,19 @@ mod tests {
         let target = BoardPos { side: Side::Enemy, cell: GridPos::new(0, 0) };
         state.resolve_action("strike", target);
         assert_eq!(state.outcome(), Some(Outcome::Victory));
+    }
+
+    #[test]
+    fn victory_rewards_scale_with_enemy_count() {
+        let units = vec![
+            unit("Heros", Side::Player, 0, 0, 20, 10, &["strike"]),
+            unit("Gobelin A", Side::Enemy, 0, 0, 5, 5, &["strike"]),
+            unit("Gobelin B", Side::Enemy, 1, 0, 5, 4, &["strike"]),
+        ];
+        let state = BattleState::new(units, vec![strike_spell()]);
+        let rewards = state.victory_rewards();
+        assert_eq!(rewards.xp, 2 * XP_PER_ENEMY);
+        assert_eq!(rewards.gold, 2 * GOLD_PER_ENEMY);
     }
 
     #[test]

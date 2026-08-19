@@ -20,6 +20,7 @@ use godot::global::{randf, MouseButton};
 use godot::prelude::*;
 
 use crate::geometry::GridPos;
+use crate::session;
 
 use super::data;
 use super::engine::{self, BattleState, BoardPos, Outcome, Side, TargetKind, UnitId, BOARD_BOUNDS};
@@ -72,6 +73,9 @@ enum Phase {
         hover: Option<BoardPos>,
         labels: HashMap<UnitId, Gd<Label>>,
     },
+    /// Défaite uniquement : la victoire ne s'arrête pas ici, elle repart
+    /// directement sur la carte (voir `enter_end_state`) avec la récompense
+    /// en attente dans `session::PendingReward`, affichée là-bas.
     End(Outcome),
 }
 
@@ -355,7 +359,37 @@ impl BattleScene {
         }
     }
 
+    /// La victoire n'affiche plus d'écran ici : elle calcule la récompense,
+    /// la met en attente pour la carte, et y repart tout de suite. Seule la
+    /// défaite garde un écran dédié (rien à récapituler, et la pénalité de
+    /// défaite reste à définir — specs, section 9).
     fn enter_end_state(&mut self, outcome: Outcome) {
+        if outcome == Outcome::Victory {
+            if let Phase::Fight { battle, .. } = &self.phase {
+                let rewards = battle.victory_rewards();
+                let loot_index = ((randf() * engine::LOOT_TABLE.len() as f64) as usize).min(engine::LOOT_TABLE.len() - 1);
+                let loot = engine::LOOT_TABLE[loot_index];
+                session::add_rewards(rewards.xp, rewards.gold);
+                session::add_loot(loot);
+                session::queue_reward(session::PendingReward { xp: rewards.xp, gold: rewards.gold, loot });
+                session::record_battle(session::BattleRecord {
+                    result: session::BattleResult::Victory,
+                    xp: rewards.xp,
+                    gold: rewards.gold,
+                    loot: Some(loot),
+                });
+            }
+            self.base().get_tree().change_scene_to_file("res://scenes/world.tscn");
+            return;
+        }
+
+        session::record_battle(session::BattleRecord {
+            result: session::BattleResult::Defeat,
+            xp: 0,
+            gold: 0,
+            loot: None,
+        });
+
         self.phase = Phase::End(outcome);
         self.refresh_ui();
         self.base_mut().queue_redraw();
