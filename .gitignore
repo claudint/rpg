@@ -1,0 +1,26 @@
+# ---- Godot 4 ----
+.godot/
+*.translation
+export.cfg
+export_presets.cfg
+
+# Fichiers d'import générés automatiquement par Godot (régénérés au besoin)
+*.import
+
+# ---- Rust ----
+rust/target/
+backend-api/target/
+**/*.rs.bk
+# Cargo.lock est volontairement VERSIONNÉ (pas ignoré) : comme c'est un projet
+# applicatif (jeu), pas une librairie, on veut des builds reproductibles.
+
+# ---- Système / éditeur ----
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# ---- Secrets (à ne jamais versionner) ----
+.env
+*.pem

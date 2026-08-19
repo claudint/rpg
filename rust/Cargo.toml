@@ -1,0 +1,13 @@
+[package]
+name = "rpg_rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# cdylib : Godot charge cette crate comme une librairie dynamique (.dll/.so/.dylib)
+# rlib : garde aussi le format Rust classique, utile si tu veux réutiliser ce code
+#        (ex: dans le futur backend/serveur) sans dupliquer la logique
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+godot = "0.5"
