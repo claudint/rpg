@@ -44,7 +44,7 @@ pub struct WorldScene {
     move_queue: VecDeque<GridPos>,
     /// Vrai pendant qu'un popup (ex. récompense de victoire) est affiché :
     /// on ignore alors les entrées de déplacement.
-    has_open_popup: bool,
+    input_blocked: bool,
 }
 
 #[godot_api]
@@ -62,7 +62,7 @@ impl INode2D for WorldScene {
             logical_pos: start,
             visual_pos: grid_to_pixels(start),
             move_queue: VecDeque::new(),
-            has_open_popup: false,
+            input_blocked: false,
         }
     }
 
@@ -86,7 +86,7 @@ impl INode2D for WorldScene {
     }
 
     fn unhandled_input(&mut self, event: Gd<InputEvent>) {
-        if self.has_open_popup {
+        if self.input_blocked {
             return;
         }
 
@@ -169,10 +169,36 @@ impl WorldScene {
         self.base().get_tree().change_scene_to_file("res://scenes/battle.tscn");
     }
 
+    /// Utilisé par la console de dev (`dev_console`) pour bloquer/débloquer
+    /// le déplacement depuis l'extérieur de la scène, en plus de son usage
+    /// interne pour les popups de cet écran.
+    pub fn set_input_blocked(&mut self, blocked: bool) {
+        self.input_blocked = blocked;
+    }
+
+    /// Déclenche un combat immédiatement, sans jet de probabilité (commande
+    /// de dev `start_battle`).
+    pub fn force_start_battle(&mut self) {
+        self.enter_battle(self.logical_pos);
+    }
+
+    /// Téléporte le joueur sur la carte d'exploration (commande de dev
+    /// `teleport x y`). Erreur si la case est hors limites.
+    pub fn teleport(&mut self, x: i32, y: i32) -> Result<(), &'static str> {
+        let pos = GridPos::new(x, y);
+        if !self.bounds.contains(pos) {
+            return Err("position hors limites");
+        }
+        self.logical_pos = pos;
+        self.visual_pos = grid_to_pixels(pos);
+        self.move_queue.clear();
+        Ok(())
+    }
+
     /// Popup de récompense après un combat gagné (specs, section 6 étape 5).
     /// `backdrop` couvre tout l'écran et absorbe les clics (mouse_filter par
     /// défaut = Stop) pour empêcher de bouger le joueur pendant qu'il est
-    /// affiché ; `has_open_popup` fait pareil côté clavier.
+    /// affiché ; `input_blocked` fait pareil côté clavier.
     fn show_reward_popup(&mut self, reward: session::PendingReward) {
         let viewport_size = self.base().get_viewport_rect().size;
 
@@ -203,13 +229,13 @@ impl WorldScene {
         backdrop.add_child(&ok_button);
 
         self.base_mut().add_child(&backdrop);
-        self.has_open_popup = true;
+        self.input_blocked = true;
 
         let mut this = self.to_gd();
         let mut backdrop_handle = backdrop.clone();
         let callable = Callable::from_fn("close_reward_popup", move |_args: &[&Variant]| {
             backdrop_handle.queue_free();
-            this.bind_mut().has_open_popup = false;
+            this.bind_mut().input_blocked = false;
             Variant::nil()
         });
         ok_button.connect("pressed", &callable);
@@ -334,13 +360,13 @@ impl WorldScene {
         backdrop.add_child(&close_button);
 
         self.base_mut().add_child(&backdrop);
-        self.has_open_popup = true;
+        self.input_blocked = true;
 
         let mut this = self.to_gd();
         let mut backdrop_handle = backdrop.clone();
         let callable = Callable::from_fn("close_list_popup", move |_args: &[&Variant]| {
             backdrop_handle.queue_free();
-            this.bind_mut().has_open_popup = false;
+            this.bind_mut().input_blocked = false;
             Variant::nil()
         });
         close_button.connect("pressed", &callable);

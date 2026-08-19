@@ -1,7 +1,7 @@
 mod data;
 mod engine;
 mod pattern;
-mod scene;
+pub(crate) mod scene;
 
 /// Résumé de l'équipe par défaut, pour l'écran "Équipe" de la carte du monde
 /// (`world::scene`). Pas de vraie gestion d'équipe pour l'instant (le modèle

@@ -1,4 +1,4 @@
 mod encounter;
 pub mod grid;
-mod scene;
+pub(crate) mod scene;
 mod town;

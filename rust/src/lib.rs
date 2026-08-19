@@ -1,6 +1,7 @@
 use godot::prelude::*;
 
 mod battle;
+mod dev_console;
 mod geometry;
 mod session;
 mod world;

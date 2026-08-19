@@ -172,6 +172,29 @@ impl BattleScene {
 }
 
 impl BattleScene {
+    /// Soigne toute l'équipe joueur à fond (commande de dev `heal_team`).
+    /// Erreur s'il n'y a pas de combat en cours (encore en placement, ou déjà
+    /// terminé).
+    pub fn heal_player_team(&mut self) -> Result<(), &'static str> {
+        let healed = if let Phase::Fight { battle, .. } = &mut self.phase {
+            for unit in battle.units.iter_mut() {
+                if unit.side == Side::Player {
+                    unit.hp = unit.max_hp;
+                }
+            }
+            true
+        } else {
+            false
+        };
+
+        if healed {
+            self.update_unit_labels();
+            Ok(())
+        } else {
+            Err("pas de combat en cours")
+        }
+    }
+
     fn mouse_click_local(&self, event: &Gd<InputEvent>) -> Option<Vector2> {
         let mouse_event = event.clone().try_cast::<InputEventMouseButton>().ok()?;
         if mouse_event.get_button_index() != MouseButton::LEFT || !mouse_event.is_pressed() {
