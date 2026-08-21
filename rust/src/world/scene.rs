@@ -13,6 +13,7 @@ use godot::classes::{
 use godot::global::{randf, Key, MouseButton};
 use godot::prelude::*;
 
+use crate::dev_console::DevConsole;
 use crate::session;
 
 use super::encounter;
@@ -74,6 +75,7 @@ impl INode2D for WorldScene {
         self.add_menu_button(Vector2::new(660.0, 70.0), "Inventaire", WorldScene::open_inventory_popup);
         self.add_menu_button(Vector2::new(660.0, 120.0), "Équipe", WorldScene::open_team_popup);
         self.add_menu_button(Vector2::new(660.0, 170.0), "Statistiques", WorldScene::open_stats_popup);
+        self.add_menu_button(Vector2::new(660.0, 220.0), "Sauvegarder", WorldScene::save_game);
 
         if let Some(reward) = session::take_pending_reward() {
             self.show_reward_popup(reward);
@@ -305,6 +307,20 @@ impl WorldScene {
             progress.xp, progress.gold, wins, losses
         )];
         self.open_list_popup("Statistiques", entries, false);
+    }
+
+    /// Sauvegarde manuelle (specs, Phase 2). `DevConsole` est le seul noeud
+    /// qui persiste entre les écrans et porte les requêtes HTTP vers
+    /// `backend-api` ; on l'atteint par le chemin absolu de l'autoload.
+    fn save_game(&mut self) {
+        if let Some(root) = self.base().get_tree().get_root() {
+            if let Some(node) = root.get_node_or_null("DevConsole") {
+                if let Ok(console) = node.try_cast::<DevConsole>() {
+                    console.bind().save();
+                }
+            }
+        }
+        self.open_list_popup("Sauvegarde", vec!["Partie sauvegardée !".to_string()], false);
     }
 
     /// Popup générique listant `entries` dans un conteneur défilant (specs

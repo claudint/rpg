@@ -19,6 +19,7 @@ use godot::classes::{
 use godot::global::{randf, MouseButton};
 use godot::prelude::*;
 
+use crate::dev_console::DevConsole;
 use crate::geometry::GridPos;
 use crate::session;
 
@@ -402,6 +403,7 @@ impl BattleScene {
                     loot: Some(loot),
                 });
             }
+            self.trigger_auto_save();
             self.base().get_tree().change_scene_to_file("res://scenes/world.tscn");
             return;
         }
@@ -416,6 +418,23 @@ impl BattleScene {
         self.phase = Phase::End(outcome);
         self.refresh_ui();
         self.base_mut().queue_redraw();
+    }
+
+    /// Sauvegarde la progression via le backend (specs, Phase 2). `DevConsole`
+    /// est le seul noeud qui persiste entre les écrans et porte les requêtes
+    /// HTTP, on l'atteint donc via le chemin absolu de l'autoload plutôt que
+    /// via une dépendance directe entre modules de scène.
+    fn trigger_auto_save(&self) {
+        let Some(root) = self.base().get_tree().get_root() else {
+            return;
+        };
+        let Some(node) = root.get_node_or_null("DevConsole") else {
+            return;
+        };
+        let Ok(console) = node.try_cast::<DevConsole>() else {
+            return;
+        };
+        console.bind().save();
     }
 
     fn select_spell(&mut self, spell_id: String) {

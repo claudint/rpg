@@ -36,6 +36,12 @@ pub fn progress() -> PlayerProgress {
     *PROGRESS.lock().unwrap()
 }
 
+/// Remplace la progression d'un coup (par opposition à `add_rewards`, qui
+/// l'incrémente) : utilisé au chargement d'une sauvegarde.
+pub fn set_progress(xp: i32, gold: i32) {
+    *PROGRESS.lock().unwrap() = PlayerProgress { xp, gold };
+}
+
 /// Récompense d'un combat gagné, à afficher une fois de retour sur la carte
 /// (specs, section 6 étape 5).
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +86,12 @@ pub fn battle_history() -> Vec<BattleRecord> {
     HISTORY.lock().unwrap().clone()
 }
 
+/// Remplace tout l'historique d'un coup : utilisé au chargement d'une
+/// sauvegarde.
+pub fn set_history(records: Vec<BattleRecord>) {
+    *HISTORY.lock().unwrap() = records;
+}
+
 static INVENTORY: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 pub fn add_loot(item: &'static str) {
@@ -88,4 +100,10 @@ pub fn add_loot(item: &'static str) {
 
 pub fn inventory() -> Vec<&'static str> {
     INVENTORY.lock().unwrap().clone()
+}
+
+/// Remplace tout l'inventaire d'un coup : utilisé au chargement d'une
+/// sauvegarde.
+pub fn set_inventory(items: Vec<&'static str>) {
+    *INVENTORY.lock().unwrap() = items;
 }

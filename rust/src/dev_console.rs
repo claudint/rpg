@@ -4,13 +4,14 @@
 //! quand la scène change, donc la console reste ouvrable partout.
 
 use godot::classes::{
-    CanvasLayer, ColorRect, Control, ICanvasLayer, InputEvent, InputEventKey, Label, LineEdit, ScrollContainer,
-    VBoxContainer,
+    CanvasLayer, ColorRect, Control, HttpRequest, ICanvasLayer, InputEvent, InputEventKey, Label, LineEdit,
+    ScrollContainer, VBoxContainer,
 };
 use godot::global::Key;
 use godot::prelude::*;
 
 use crate::battle::scene::BattleScene;
+use crate::persistence;
 use crate::session;
 use crate::world::scene::WorldScene;
 
@@ -21,12 +22,14 @@ pub struct DevConsole {
     panel: Option<Gd<Control>>,
     input: Option<Gd<LineEdit>>,
     log: Option<Gd<VBoxContainer>>,
+    save_http: Option<Gd<HttpRequest>>,
+    load_http: Option<Gd<HttpRequest>>,
 }
 
 #[godot_api]
 impl ICanvasLayer for DevConsole {
     fn init(base: Base<CanvasLayer>) -> Self {
-        Self { base, panel: None, input: None, log: None }
+        Self { base, panel: None, input: None, log: None, save_http: None, load_http: None }
     }
 
     fn ready(&mut self) {
@@ -69,7 +72,12 @@ impl ICanvasLayer for DevConsole {
         self.input = Some(input);
         self.log = Some(log);
 
+        self.setup_http_nodes();
         self.print_line("Console de dev prête. Tape 'help' pour la liste des commandes.");
+
+        // Chargement de la sauvegarde au tout premier lancement (voir
+        // `setup_http_nodes` pour la lecture de la réponse, asynchrone).
+        self.load();
     }
 
     fn input(&mut self, event: Gd<InputEvent>) {
@@ -101,6 +109,55 @@ impl DevConsole {
             world.set_input_blocked(now_visible);
             Ok(())
         });
+    }
+
+    fn setup_http_nodes(&mut self) {
+        let save_http = HttpRequest::new_alloc();
+        self.base_mut().add_child(&save_http);
+        self.save_http = Some(save_http);
+
+        let mut load_http = HttpRequest::new_alloc();
+
+        let mut this = self.to_gd();
+        let callable = Callable::from_fn("on_load_response", move |args: &[&Variant]| {
+            let body = args[3].to::<PackedByteArray>();
+            this.bind_mut().on_load_response(body);
+            Variant::nil()
+        });
+        load_http.connect("request_completed", &callable);
+
+        self.base_mut().add_child(&load_http);
+        self.load_http = Some(load_http);
+    }
+
+    /// Lance une sauvegarde. Utilisé par la commande `save` et par
+    /// `BattleScene` après une victoire (`get_node_or_null("/root/DevConsole")`
+    /// puis appel direct, cette méthode doit donc rester `pub`).
+    pub fn save(&self) {
+        if let Some(mut http) = self.save_http.clone() {
+            persistence::request_save(&mut http);
+        }
+    }
+
+    fn load(&self) {
+        if let Some(mut http) = self.load_http.clone() {
+            persistence::request_load(&mut http);
+        }
+    }
+
+    /// Réponse à `GET /save`, reçue de manière asynchrone (potentiellement
+    /// après que `WorldScene` a déjà démarré avec la position par défaut) :
+    /// en plus de mettre à jour `session.rs`, on essaie de téléporter le
+    /// joueur si la carte est déjà affichée.
+    fn on_load_response(&mut self, body: PackedByteArray) {
+        let Some(data) = persistence::parse_response(&body) else {
+            self.print_line("Chargement : aucune sauvegarde valide (backend éteint ou pas de sauvegarde).");
+            return;
+        };
+        let (pos_x, pos_y) = (data.pos_x, data.pos_y);
+        data.apply();
+        let _ = self.with_world_scene(|world| world.teleport(pos_x, pos_y));
+        self.print_line("Sauvegarde chargée.");
     }
 
     fn print_line(&mut self, text: &str) {
@@ -136,9 +193,17 @@ impl DevConsole {
 
         match command {
             "help" => Ok(
-                "Commandes : help, give_xp <n>, give_gold <n>, teleport <x> <y>, start_battle, heal_team"
+                "Commandes : help, give_xp <n>, give_gold <n>, teleport <x> <y>, start_battle, heal_team, save, load"
                     .to_string(),
             ),
+            "save" => {
+                self.save();
+                Ok("sauvegarde envoyée au backend".to_string())
+            }
+            "load" => {
+                self.load();
+                Ok("chargement demandé au backend".to_string())
+            }
             "give_xp" => {
                 let amount = parse_i32(&args, 0)?;
                 session::add_rewards(amount, 0);

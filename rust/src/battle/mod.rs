@@ -12,3 +12,10 @@ pub fn team_summary() -> Vec<String> {
         .map(|u| format!("{}\nPV {}, Vitesse {}\nSorts : {}", u.name, u.hp, u.speed, u.spell_ids.join(", ")))
         .collect()
 }
+
+/// Butin connu du jeu, pour ré-associer les noms sauvegardés (juste des
+/// `String`) à leur `&'static str` d'origine au chargement d'une sauvegarde
+/// (`persistence.rs`).
+pub fn known_loot_items() -> &'static [&'static str] {
+    engine::LOOT_TABLE
+}
