@@ -74,10 +74,6 @@ impl ICanvasLayer for DevConsole {
 
         self.setup_http_nodes();
         self.print_line("Console de dev prête. Tape 'help' pour la liste des commandes.");
-
-        // Chargement de la sauvegarde au tout premier lancement (voir
-        // `setup_http_nodes` pour la lecture de la réponse, asynchrone).
-        self.load();
     }
 
     fn input(&mut self, event: Gd<InputEvent>) {
@@ -139,7 +135,12 @@ impl DevConsole {
         }
     }
 
-    fn load(&self) {
+    /// Lance un chargement. Appelé par la commande `load` et par
+    /// `LoginScene` juste après une connexion/inscription réussie (plus au
+    /// tout premier lancement du jeu : il n'y a plus de session avant que
+    /// l'écran de connexion en obtienne une), donc `pub` pour la même
+    /// raison que `save()`.
+    pub fn load(&self) {
         if let Some(mut http) = self.load_http.clone() {
             persistence::request_load(&mut http);
         }

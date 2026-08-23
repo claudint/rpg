@@ -5,8 +5,11 @@ pour reprendre le travail dans une nouvelle conversation. Les specs
 complètes restent dans `specs-jeu-rpg-tactique.md`, les conventions dans
 `CLAUDE.md` — les deux à lire avant toute modification importante.
 
-Tout ce qui est décrit ici est **poussé sur `origin/main`** (dernier commit :
-`d4a8efd`). Rien en attente localement.
+Tout ce qui est décrit ici jusqu'à la Phase 2 est **poussé sur
+`origin/main`** (dernier commit : `d4a8efd`). Le début de la Phase 3
+(comptes joueurs, section suivante) est fait et testé localement, mais
+**pas encore commité** — à valider avec l'utilisateur avant de committer/
+pousser.
 
 ## Ce qui est fait
 
@@ -68,6 +71,43 @@ Postgres 15 et voulait éviter une réécriture au moment du multijoueur :
   contrairement à un fichier local). Sauvegarde automatique après une
   victoire, bouton "Sauvegarder", commandes console `save`/`load`.
 
+### Phase 3 — Multijoueur, comptes joueurs (specs section 6 étape 7, début) : fait, pas commité
+
+Première brique avant tout déplacement/combat synchronisé : le jeu sait
+maintenant distinguer les joueurs (avant, tout était câblé en dur sur
+`player_id = 1`). Décisions prises avec l'utilisateur : base Postgres locale
+= données de test jetables (reset propre plutôt que migration de
+l'existant), un seul écran gérant inscription et connexion, contexte
+local/LAN uniquement pour l'instant (pas de TLS/durcissement). Plan complet
+dans `C:\Users\maxen\.claude\plans\linear-soaring-bird.md` si besoin de
+retrouver le détail des décisions.
+
+- **`backend-api/migrations/0005_auth.sql`** : `players.password_hash`
+  (argon2) + `players.name` unique, `saves.player_id` devient la clé
+  d'upsert (unique + `saves.id` auto-généré), nouvelle table `sessions`
+  (jeton opaque → player_id, pas d'expiration pour l'instant). Reset des
+  tables `players`/`saves`/`inventory_items`/`battle_history`/
+  `player_characters` (données de test jetables).
+- **Routes** `POST /register` / `POST /login` (`backend-api/src/main.rs`) :
+  mot de passe haché avec `argon2`, jeton de session en `Uuid`. `GET/PUT
+  /save` exigent désormais un extracteur `AuthedPlayer` (en-tête
+  `Authorization: Bearer <token>`) et sont paramétrés par joueur au lieu de
+  l'id 1 en dur. Testé de bout en bout au `curl` (inscription, doublon de
+  nom, mauvais mot de passe, isolation des sauvegardes entre deux comptes).
+- **Écran de connexion** (`rust/src/login.rs`, nouvelle scène
+  `rpg/scenes/login.tscn`, devenue `run/main_scene`) : pseudo + mot de
+  passe (`LineEdit` masqué), boutons Se connecter/Créer un compte. Sur
+  succès : jeton mémorisé dans `session.rs` (`AuthInfo`), déclenche
+  `DevConsole::load()` (devenu `pub`, plus appelé automatiquement au boot
+  comme avant), puis bascule sur `world.tscn`. `persistence.rs` ajoute
+  l'en-tête `Authorization` sur les requêtes save/load.
+- **Testé manuellement dans l'éditeur** : écran de connexion au lancement,
+  création de compte (`testeur1`) via l'UI réelle, transition vers la carte
+  du monde, compte confirmé fonctionnel côté backend au `curl` après coup.
+- Limitation acceptée : la console F1 reste accessible sur l'écran de
+  connexion (autoload global) ; `save`/`load` lancés avant connexion
+  échouent silencieusement (401), comme "backend éteint" aujourd'hui.
+
 ## Pour relancer le projet
 
 1. **Backend** : `cd backend-api && cargo run` (nécessite
@@ -101,8 +141,10 @@ Postgres 15 et voulait éviter une réécriture au moment du multijoueur :
 
 ## Pas encore fait / pistes pour la suite
 
-- **Phase 3-4 des specs (multijoueur, PvP)** : rien commencé. Le schéma
-  Postgres est préparé (`players`) mais aucun compte/authentification.
+- **Phase 3 (suite) et Phase 4 des specs (coop temps réel, PvP)** : les
+  comptes joueurs sont faits (voir ci-dessus), mais rien du serveur temps
+  réel (Godot headless + Rust, specs section 4-5), aucune synchronisation de
+  déplacement/combat entre joueurs, pas de matchmaking.
 - **Sélection de composition d'équipe** : `player_characters.selected`
   existe en base mais aucune UI pour la modifier (l'équipe reste la liste
   par défaut codée dans `rust/data/characters.json`).

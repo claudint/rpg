@@ -92,6 +92,24 @@ pub fn set_history(records: Vec<BattleRecord>) {
     *HISTORY.lock().unwrap() = records;
 }
 
+/// Jeton de session obtenu à la connexion (Phase 3) : joint aux requêtes
+/// `save`/`load` en `Authorization: Bearer <token>`. `None` avant connexion.
+#[derive(Debug, Clone)]
+pub struct AuthInfo {
+    pub token: String,
+    pub player_id: i32,
+}
+
+static AUTH: Mutex<Option<AuthInfo>> = Mutex::new(None);
+
+pub fn set_auth(token: String, player_id: i32) {
+    *AUTH.lock().unwrap() = Some(AuthInfo { token, player_id });
+}
+
+pub fn auth_token() -> Option<String> {
+    AUTH.lock().unwrap().as_ref().map(|auth| auth.token.clone())
+}
+
 static INVENTORY: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 pub fn add_loot(item: &'static str) {

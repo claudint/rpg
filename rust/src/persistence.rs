@@ -15,7 +15,19 @@ use crate::battle;
 use crate::session;
 use crate::world::grid::GridPos;
 
-const BASE_URL: &str = "http://127.0.0.1:8080";
+pub(crate) const BASE_URL: &str = "http://127.0.0.1:8080";
+
+/// En-têtes communs à toute requête authentifiée : `Content-Type` (les deux
+/// endpoints /save échangent du JSON même en GET, sans effet s'il est
+/// ignoré) et `Authorization` si une session est active (voir `login.rs`).
+fn authed_headers() -> PackedStringArray {
+    let mut headers = PackedStringArray::new();
+    headers.push("Content-Type: application/json");
+    if let Some(token) = session::auth_token() {
+        headers.push(&format!("Authorization: Bearer {token}"));
+    }
+    headers
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SaveData {
@@ -89,18 +101,15 @@ pub fn request_save(http: &mut Gd<HttpRequest>) {
         return;
     };
 
-    let mut headers = PackedStringArray::new();
-    headers.push("Content-Type: application/json");
-
     let url = format!("{BASE_URL}/save");
-    let _ = http.request_ex(&url).method(Method::PUT).custom_headers(&headers).request_data(&body).done();
+    let _ = http.request_ex(&url).method(Method::PUT).custom_headers(&authed_headers()).request_data(&body).done();
 }
 
 /// Lance une requête `GET /save`. La réponse arrive plus tard via le signal
 /// `request_completed` du même noeud ; voir `parse_response`.
 pub fn request_load(http: &mut Gd<HttpRequest>) {
     let url = format!("{BASE_URL}/save");
-    let _ = http.request(&url);
+    let _ = http.request_ex(&url).method(Method::GET).custom_headers(&authed_headers()).done();
 }
 
 /// Parse le corps d'une réponse `GET /save` réussie. `None` si le JSON est
