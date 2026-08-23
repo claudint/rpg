@@ -18,6 +18,7 @@ config/icon="res://icon.svg"
 [autoload]
 
 DevConsole="*res://scenes/dev_console.tscn"
+CoopSession="*res://scenes/coop_session.tscn"
 
 [display]
 

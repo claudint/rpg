@@ -7,13 +7,14 @@
 use std::collections::VecDeque;
 
 use godot::classes::{
-    Button, ColorRect, HSeparator, InputEvent, InputEventKey, InputEventMouseButton, Label, ScrollContainer,
-    VBoxContainer,
+    Button, ColorRect, HSeparator, InputEvent, InputEventKey, InputEventMouseButton, Label, LineEdit,
+    ScrollContainer, VBoxContainer,
 };
 use godot::global::{randf, Key, MouseButton};
 use godot::prelude::*;
 
 use crate::dev_console::DevConsole;
+use crate::network::CoopSession;
 use crate::session;
 
 use super::encounter;
@@ -51,7 +52,7 @@ pub struct WorldScene {
 #[godot_api]
 impl INode2D for WorldScene {
     fn init(base: Base<Node2D>) -> Self {
-        let bounds = GridBounds { width: 10, height: 8 };
+        let bounds = grid::WORLD_BOUNDS;
         // Au premier lancement, ça vaut (0, 0) (valeur par défaut de
         // `session::return_point`). En revenant d'un écran secondaire (ville,
         // combat...), ça replace le joueur sur la case qui l'y a envoyé.
@@ -76,6 +77,7 @@ impl INode2D for WorldScene {
         self.add_menu_button(Vector2::new(660.0, 120.0), "Équipe", WorldScene::open_team_popup);
         self.add_menu_button(Vector2::new(660.0, 170.0), "Statistiques", WorldScene::open_stats_popup);
         self.add_menu_button(Vector2::new(660.0, 220.0), "Sauvegarder", WorldScene::save_game);
+        self.add_menu_button(Vector2::new(660.0, 270.0), "Coop", WorldScene::open_coop_popup);
 
         if let Some(reward) = session::take_pending_reward() {
             self.show_reward_popup(reward);
@@ -104,6 +106,7 @@ impl INode2D for WorldScene {
 
     fn draw(&mut self) {
         self.draw_grid();
+        self.draw_other_players();
         self.draw_player();
     }
 }
@@ -153,11 +156,44 @@ impl WorldScene {
     /// Met à jour la case logique du joueur et déclenche l'entrée dans un
     /// point d'intérêt si la case d'arrivée en contient un.
     fn arrive_at(&mut self, pos: GridPos) {
+        let previous = self.logical_pos;
         self.logical_pos = pos;
+        self.notify_coop_move(previous, pos);
         if pos == TOWN_POS {
             self.enter_town();
         } else if encounter::should_trigger(randf(), ENCOUNTER_CHANCE) {
             self.enter_battle(pos);
+        }
+    }
+
+    /// Relaie un déplacement d'une case à la session coop (Phase 3 étape 7).
+    /// No-op hors coop (`CoopSession::notify_local_move`) ; ignoré aussi
+    /// pour un saut multi-case (téléportation, qui ne passe pas par
+    /// `arrive_at`) puisqu'aucune `Direction` ne peut le représenter.
+    fn notify_coop_move(&mut self, from: GridPos, to: GridPos) {
+        let dir = match (to.x - from.x, to.y - from.y) {
+            (0, -1) => Direction::Up,
+            (0, 1) => Direction::Down,
+            (-1, 0) => Direction::Left,
+            (1, 0) => Direction::Right,
+            _ => return,
+        };
+        if let Some(mut coop) = self.coop_session() {
+            coop.bind_mut().notify_local_move(dir);
+        }
+    }
+
+    /// Accès à l'autoload `CoopSession`, même pattern que `save_game` pour
+    /// `DevConsole` : chemin absolu depuis la racine de l'arbre de scène.
+    fn coop_session(&self) -> Option<Gd<CoopSession>> {
+        let root = self.base().get_tree().get_root()?;
+        let node = root.get_node_or_null("CoopSession")?;
+        node.try_cast::<CoopSession>().ok()
+    }
+
+    fn join_coop(&mut self, address: String, port: i32, name: String) {
+        if let Some(mut coop) = self.coop_session() {
+            coop.bind_mut().connect_to(address, port, name);
         }
     }
 
@@ -431,6 +467,101 @@ impl WorldScene {
             Vector2::new(TILE_SIZE - margin * 2.0, TILE_SIZE - margin * 2.0),
         );
         self.base_mut().draw_rect(rect, Color::from_rgb(0.3, 0.7, 1.0));
+    }
+
+    /// Joueurs distants (Phase 3 étape 7) : dessinés directement à leur
+    /// position connue, sans glissé (contrairement au joueur local) —
+    /// simplification volontaire pour cette itération.
+    fn draw_other_players(&mut self) {
+        let Some(coop) = self.coop_session() else {
+            return;
+        };
+        let margin = 8.0;
+        for (_, pos) in coop.bind().other_players() {
+            let rect = Rect2::new(
+                grid_to_pixels(pos) + Vector2::new(margin, margin),
+                Vector2::new(TILE_SIZE - margin * 2.0, TILE_SIZE - margin * 2.0),
+            );
+            self.base_mut().draw_rect(rect, Color::from_rgb(1.0, 0.55, 0.2));
+        }
+    }
+
+    /// Popup pour rejoindre une partie coop (Phase 3 étape 7) : mêmes
+    /// scaffolding que `open_list_popup`/`show_reward_popup`, avec des
+    /// `LineEdit` pré-remplis au lieu de simples `Label`.
+    fn open_coop_popup(&mut self) {
+        let mut backdrop = ColorRect::new_alloc();
+        backdrop.set_size(self.base().get_viewport_rect().size);
+        backdrop.set_color(Color::from_rgba(0.0, 0.0, 0.0, 0.55));
+
+        let mut panel = ColorRect::new_alloc();
+        panel.set_position(Vector2::new(100.0, 60.0));
+        panel.set_size(Vector2::new(360.0, 420.0));
+        panel.set_color(Color::from_rgb(0.15, 0.15, 0.2));
+        backdrop.add_child(&panel);
+
+        let mut title = Label::new_alloc();
+        title.set_position(Vector2::new(120.0, 76.0));
+        title.set_text("Rejoindre une partie coop");
+        backdrop.add_child(&title);
+
+        let mut address_input = LineEdit::new_alloc();
+        address_input.set_position(Vector2::new(120.0, 130.0));
+        address_input.set_size(Vector2::new(300.0, 32.0));
+        address_input.set_text("127.0.0.1");
+        backdrop.add_child(&address_input);
+
+        let mut port_input = LineEdit::new_alloc();
+        port_input.set_position(Vector2::new(120.0, 196.0));
+        port_input.set_size(Vector2::new(300.0, 32.0));
+        port_input.set_text("9000");
+        backdrop.add_child(&port_input);
+
+        let mut name_input = LineEdit::new_alloc();
+        name_input.set_position(Vector2::new(120.0, 262.0));
+        name_input.set_size(Vector2::new(300.0, 32.0));
+        name_input.set_placeholder("Pseudo");
+        backdrop.add_child(&name_input);
+
+        let mut join_button = Button::new_alloc();
+        join_button.set_position(Vector2::new(120.0, 330.0));
+        join_button.set_size(Vector2::new(140.0, 36.0));
+        join_button.set_text("Rejoindre");
+        backdrop.add_child(&join_button);
+
+        let mut close_button = Button::new_alloc();
+        close_button.set_position(Vector2::new(280.0, 330.0));
+        close_button.set_size(Vector2::new(140.0, 36.0));
+        close_button.set_text("Fermer");
+        backdrop.add_child(&close_button);
+
+        self.base_mut().add_child(&backdrop);
+        self.input_blocked = true;
+
+        let mut this = self.to_gd();
+        let mut backdrop_handle = backdrop.clone();
+        let address_handle = address_input.clone();
+        let port_handle = port_input.clone();
+        let name_handle = name_input.clone();
+        let join_callable = Callable::from_fn("join_coop_popup", move |_args: &[&Variant]| {
+            let address = address_handle.get_text().to_string();
+            let port = port_handle.get_text().to_string().parse().unwrap_or(9000);
+            let name = name_handle.get_text().to_string();
+            this.bind_mut().join_coop(address, port, name);
+            backdrop_handle.queue_free();
+            this.bind_mut().input_blocked = false;
+            Variant::nil()
+        });
+        join_button.connect("pressed", &join_callable);
+
+        let mut this = self.to_gd();
+        let mut backdrop_handle = backdrop.clone();
+        let close_callable = Callable::from_fn("close_coop_popup", move |_args: &[&Variant]| {
+            backdrop_handle.queue_free();
+            this.bind_mut().input_blocked = false;
+            Variant::nil()
+        });
+        close_button.connect("pressed", &close_callable);
     }
 }
 

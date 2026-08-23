@@ -4,6 +4,7 @@ mod battle;
 mod dev_console;
 mod geometry;
 mod login;
+mod network;
 mod persistence;
 mod session;
 mod world;

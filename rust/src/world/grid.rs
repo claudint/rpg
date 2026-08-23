@@ -7,6 +7,12 @@
 
 pub use crate::geometry::{GridBounds, GridPos};
 
+/// Taille de la carte d'exploration (specs Phase 1 étape 1). Seule source
+/// de vérité, partagée entre `WorldScene` (client) et `CoopSession` (serveur
+/// headless coop, Phase 3 étape 7) pour qu'ils appliquent exactement les
+/// mêmes limites.
+pub const WORLD_BOUNDS: GridBounds = GridBounds { width: 10, height: 8 };
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
@@ -22,6 +28,27 @@ impl Direction {
             Direction::Down => (0, 1),
             Direction::Left => (-1, 0),
             Direction::Right => (1, 0),
+        }
+    }
+
+    /// Code compact pour transmettre une direction sur le réseau (RPC
+    /// `request_move`, voir `network.rs`) sans dépendre d'un type Godot.
+    pub fn to_code(self) -> i32 {
+        match self {
+            Direction::Up => 0,
+            Direction::Down => 1,
+            Direction::Left => 2,
+            Direction::Right => 3,
+        }
+    }
+
+    pub fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Direction::Up),
+            1 => Some(Direction::Down),
+            2 => Some(Direction::Left),
+            3 => Some(Direction::Right),
+            _ => None,
         }
     }
 }
@@ -87,5 +114,13 @@ mod tests {
     fn path_to_same_cell_is_empty() {
         let path = path_to(GridPos::new(1, 1), GridPos::new(1, 1));
         assert!(path.is_empty());
+    }
+
+    #[test]
+    fn direction_code_round_trips() {
+        for dir in [Direction::Up, Direction::Down, Direction::Left, Direction::Right] {
+            assert_eq!(Direction::from_code(dir.to_code()), Some(dir));
+        }
+        assert_eq!(Direction::from_code(42), None);
     }
 }
