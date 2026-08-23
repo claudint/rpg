@@ -135,12 +135,20 @@ client. Plan complet dans
 - **`rust/src/world/grid.rs`** : `WORLD_BOUNDS` (constante partagée
   client/serveur, avant codée en dur dans `WorldScene::init`),
   `Direction::to_code`/`from_code` pour le transport réseau.
-- **Bug rencontré et corrigé** : appeler `get_unique_id()` sur un
-  `ENetMultiplayerPeer` pas encore connecté fait planter le client en
-  boucle d'erreurs (une par frame). Corrigé en gardant une référence Rust
-  explicite sur le peer (`CoopSession.peer`, sinon gdext pouvait le libérer
-  trop tôt) et en ne touchant plus l'API multiplayer tant que
-  `connected`/`is_server` est faux.
+- **Bugs rencontrés et corrigés** :
+  - Appeler `get_unique_id()` sur un `ENetMultiplayerPeer` pas encore
+    connecté fait planter le client en boucle d'erreurs (une par frame).
+    Corrigé en gardant une référence Rust explicite sur le peer
+    (`CoopSession.peer`, sinon gdext pouvait le libérer trop tôt) et en ne
+    touchant plus l'API multiplayer tant que `connected`/`is_server` est
+    faux.
+  - `request_join` initialisait tout nouveau joueur à `(0, 0)` côté serveur
+    quelle que soit sa vraie position (restaurée depuis la sauvegarde) :
+    les joueurs déjà présents le voyaient donc "téléporter" depuis
+    l'origine de la grille jusqu'à sa vraie case au premier déplacement,
+    au lieu de le voir directement à la bonne case en rejoignant. Corrigé
+    en transmettant la position courante du joueur (`WorldScene::logical_pos`)
+    dans `connect_to`/`request_join`, au lieu de la coder en dur.
 - **Testé manuellement** : serveur headless + deux clients fenêtrés
   (`alice`/`bob`), jointure coop des deux côtés, déplacement d'un joueur
   visible en temps réel dans l'autre fenêtre, aucune erreur en log.

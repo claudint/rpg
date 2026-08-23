@@ -193,7 +193,7 @@ impl WorldScene {
 
     fn join_coop(&mut self, address: String, port: i32, name: String) {
         if let Some(mut coop) = self.coop_session() {
-            coop.bind_mut().connect_to(address, port, name);
+            coop.bind_mut().connect_to(address, port, name, self.logical_pos);
         }
     }
 

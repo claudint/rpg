@@ -46,6 +46,12 @@ pub struct CoopSession {
     /// c'est faux, pour que le solo reste sans overhead réseau.
     connected: bool,
     pending_name: Option<String>,
+    /// Position logique du joueur local au moment de la connexion (voir
+    /// `connect_to`) : envoyée avec `request_join` pour que le serveur
+    /// n'initialise pas tout le monde à (0,0) — sinon les joueurs déjà
+    /// présents voient le nouveau arrivant "téléporter" depuis l'origine de
+    /// la grille jusqu'à sa vraie case au premier déplacement.
+    pending_position: Option<GridPos>,
     /// Positions connues de tous les joueurs (y compris soi-même côté
     /// client, filtré dans `other_players`). Côté serveur, c'est l'état
     /// autoritaire ; côté client, c'est une copie reçue via `sync_state`.
@@ -65,6 +71,7 @@ impl INode for CoopSession {
             is_server: false,
             connected: false,
             pending_name: None,
+            pending_position: None,
             roster: HashMap::new(),
             peer: None,
         }
@@ -124,8 +131,10 @@ impl CoopSession {
     }
 
     /// Rejoint une partie coop hébergée à `address:port` sous le pseudo
-    /// `name`. Appelée depuis le popup "Coop" de `WorldScene`.
-    pub fn connect_to(&mut self, address: String, port: i32, name: String) {
+    /// `name`, à partir de la case `pos` où le joueur se trouve déjà sur sa
+    /// propre carte (position restaurée depuis la sauvegarde, pas
+    /// forcément (0,0)). Appelée depuis le popup "Coop" de `WorldScene`.
+    pub fn connect_to(&mut self, address: String, port: i32, name: String, pos: GridPos) {
         let mut peer = ENetMultiplayerPeer::new_gd();
         let err = peer.create_client(&address, port);
         if err != godot::global::Error::OK {
@@ -135,6 +144,7 @@ impl CoopSession {
         godot_print!("CoopSession: ENet client créé vers {address}:{port}, en attente de la poignée de main");
 
         self.pending_name = Some(name);
+        self.pending_position = Some(pos);
 
         if let Some(mut multiplayer) = self.base().get_tree().get_multiplayer() {
             multiplayer.set_multiplayer_peer(&peer);
@@ -161,8 +171,9 @@ impl CoopSession {
         let Some(name) = self.pending_name.take() else {
             return;
         };
+        let pos = self.pending_position.take().unwrap_or(GridPos::new(0, 0));
         self.connected = true;
-        let _ = self.rpcs().request_join(&name).call_id(1);
+        let _ = self.rpcs().request_join(&name, pos.x, pos.y).call_id(1);
     }
 
     fn on_peer_disconnected(&mut self, peer_id: i32) {
@@ -209,13 +220,13 @@ impl CoopSession {
     }
 
     #[rpc(any_peer, reliable)]
-    fn request_join(&mut self, name: GString) {
+    fn request_join(&mut self, name: GString, x: i32, y: i32) {
         let Some(multiplayer) = self.base().get_multiplayer() else {
             return;
         };
         let sender = multiplayer.get_remote_sender_id();
-        godot_print!("CoopSession: {name} a rejoint (peer {sender})");
-        self.roster.insert(sender, RemotePlayer { peer_id: sender, name: name.to_string(), x: 0, y: 0 });
+        godot_print!("CoopSession: {name} a rejoint (peer {sender}) à ({x}, {y})");
+        self.roster.insert(sender, RemotePlayer { peer_id: sender, name: name.to_string(), x, y });
         self.broadcast_state();
     }
 
