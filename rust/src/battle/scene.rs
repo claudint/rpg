@@ -21,6 +21,7 @@ use godot::prelude::*;
 
 use crate::dev_console::DevConsole;
 use crate::geometry::GridPos;
+use crate::network::{CoopBattlePhaseWire, CoopBattleWire, CoopSession};
 use crate::session;
 
 use super::data;
@@ -56,13 +57,6 @@ fn board_pos_at(local: Vector2) -> Option<BoardPos> {
     None
 }
 
-fn opposite(side: Side) -> Side {
-    match side {
-        Side::Player => Side::Enemy,
-        Side::Enemy => Side::Player,
-    }
-}
-
 enum Phase {
     Placement {
         pending: Vec<data::UnitDef>,
@@ -87,6 +81,20 @@ pub struct BattleScene {
     phase: Phase,
     title: Option<Gd<Label>>,
     ui_container: Option<Gd<Control>>,
+    /// Vrai si ce combat est piloté par un `CoopSession` distant (specs
+    /// section 6, étape 8) plutôt que localement : `self.phase` reste alors
+    /// la valeur par défaut d'`init()`, jamais utilisée — tout l'affichage
+    /// et les clics passent par `coop_last`/les méthodes `*_coop_*`.
+    coop: bool,
+    /// Sort choisi par le joueur local en attendant qu'il clique une cible
+    /// (équivalent coop de `Phase::Fight::pending_spell`, qui n'existe pas
+    /// puisqu'il n'y a pas de `BattleState` local en coop).
+    coop_pending_spell: Option<String>,
+    /// Dernier état reçu de `CoopSession::remote_battle()`. Mis en cache
+    /// (plutôt que relu à chaque frame) pour détecter les changements et ne
+    /// reconstruire l'UI (`refresh_ui`) que lorsque l'état a vraiment
+    /// changé, pas à chaque frame.
+    coop_last: Option<CoopBattleWire>,
 }
 
 #[godot_api]
@@ -97,6 +105,9 @@ impl IControl for BattleScene {
             phase: Phase::Placement { pending: data::default_player_roster(), placed: Vec::new() },
             title: None,
             ui_container: None,
+            coop: false,
+            coop_pending_spell: None,
+            coop_last: None,
         }
     }
 
@@ -129,26 +140,43 @@ impl IControl for BattleScene {
         self.base_mut().add_child(&ui_container);
         self.ui_container = Some(ui_container);
 
-        let this = self.to_gd();
-        let mut flee_button = Button::new_alloc();
-        flee_button.set_position(Vector2::new(600.0, 20.0));
-        flee_button.set_size(Vector2::new(120.0, 40.0));
-        flee_button.set_text("Fuir");
-        flee_button.connect("pressed", &Callable::from_object_method(&this, "on_flee_pressed"));
-        self.base_mut().add_child(&flee_button);
+        self.coop = self.coop_session().is_some_and(|coop| coop.bind().in_coop_battle());
 
+        // "Fuir" n'a pas de sens sur un combat partagé pour cette itération
+        // (abandonner l'équipe des autres joueurs en cours de combat n'est
+        // pas géré) — masqué en coop plutôt que half-implémenté.
+        if !self.coop {
+            let this = self.to_gd();
+            let mut flee_button = Button::new_alloc();
+            flee_button.set_position(Vector2::new(600.0, 20.0));
+            flee_button.set_size(Vector2::new(120.0, 40.0));
+            flee_button.set_text("Fuir");
+            flee_button.connect("pressed", &Callable::from_object_method(&this, "on_flee_pressed"));
+            self.base_mut().add_child(&flee_button);
+        }
+
+        if self.coop {
+            self.coop_last = self.coop_battle_snapshot();
+        }
         self.refresh_ui();
     }
 
     fn process(&mut self, _delta: f64) {
+        if self.coop {
+            self.poll_coop_battle();
+        }
         self.base_mut().queue_redraw();
     }
 
     fn draw(&mut self) {
         self.draw_board(Side::Player);
         self.draw_board(Side::Enemy);
-        self.draw_units();
-        self.draw_hover_preview();
+        if self.coop {
+            self.draw_coop_units();
+        } else {
+            self.draw_units();
+            self.draw_hover_preview();
+        }
     }
 
     fn unhandled_input(&mut self, event: Gd<InputEvent>) {
@@ -210,6 +238,10 @@ impl BattleScene {
     }
 
     fn handle_click(&mut self, target: BoardPos) {
+        if self.coop {
+            self.handle_coop_click(target);
+            return;
+        }
         let in_placement = matches!(self.phase, Phase::Placement { .. });
         if in_placement {
             self.try_place(target);
@@ -289,7 +321,7 @@ impl BattleScene {
             };
 
             let expected_side = match spell.target {
-                TargetKind::Enemy => opposite(caster.side),
+                TargetKind::Enemy => engine::opposite(caster.side),
                 TargetKind::Ally => caster.side,
             };
             if target.side != expected_side {
@@ -351,27 +383,7 @@ impl BattleScene {
             let Phase::Fight { battle, .. } = &self.phase else {
                 return;
             };
-            let caster_id = battle.current_unit_id();
-            let caster = battle.unit(caster_id).clone();
-
-            caster.spell_ids.first().cloned().and_then(|spell_id| {
-                let spell = battle.spell(&spell_id)?.clone();
-                let target_side = match spell.target {
-                    TargetKind::Enemy => opposite(caster.side),
-                    TargetKind::Ally => caster.side,
-                };
-                let candidates: Vec<GridPos> = battle
-                    .units
-                    .iter()
-                    .filter(|u| u.is_alive() && u.pos.side == target_side)
-                    .map(|u| u.pos.cell)
-                    .collect();
-                if candidates.is_empty() {
-                    return None;
-                }
-                let index = ((randf() * candidates.len() as f64) as usize).min(candidates.len() - 1);
-                Some((spell_id, BoardPos { side: target_side, cell: candidates[index] }))
-            })
+            engine::choose_ai_action(battle, battle.current_unit_id(), randf())
         };
 
         match action {
@@ -438,7 +450,9 @@ impl BattleScene {
     }
 
     fn select_spell(&mut self, spell_id: String) {
-        if let Phase::Fight { pending_spell, .. } = &mut self.phase {
+        if self.coop {
+            self.coop_pending_spell = Some(spell_id);
+        } else if let Phase::Fight { pending_spell, .. } = &mut self.phase {
             *pending_spell = Some(spell_id);
         }
         self.base_mut().queue_redraw();
@@ -497,6 +511,11 @@ impl BattleScene {
     fn refresh_ui(&mut self) {
         self.clear_ui_container();
 
+        if self.coop {
+            self.refresh_coop_ui();
+            return;
+        }
+
         enum UiPlan {
             None,
             SpellButtons(Vec<String>),
@@ -549,14 +568,13 @@ impl BattleScene {
         }
     }
 
+    /// Résout les noms de sorts depuis `data::spells()` (la liste statique,
+    /// pas `self.phase`) : fonctionne aussi bien en solo qu'en coop, où il
+    /// n'y a pas de `BattleState` local à consulter.
     fn build_spell_buttons(&mut self, spell_ids: Vec<String>) {
-        let spell_names: Vec<(String, String)> = match &self.phase {
-            Phase::Fight { battle, .. } => spell_ids
-                .iter()
-                .filter_map(|id| battle.spell(id).map(|s| (id.clone(), s.name.clone())))
-                .collect(),
-            _ => Vec::new(),
-        };
+        let spells = data::spells();
+        let spell_names: Vec<(String, String)> =
+            spell_ids.iter().filter_map(|id| spells.iter().find(|s| &s.id == id).map(|s| (id.clone(), s.name.clone()))).collect();
 
         let Some(mut container) = self.ui_container.clone() else {
             return;
@@ -654,6 +672,126 @@ impl BattleScene {
         for pos in cells {
             let rect = Rect2::new(cell_screen_pos(pos), Vector2::new(CELL, CELL));
             self.base_mut().draw_rect(rect, overlay);
+        }
+    }
+
+    // --- Combat coop (specs section 6, étape 8) ---
+    //
+    // Contrairement au solo, il n'y a pas de `BattleState` local ici : tout
+    // vient de `CoopSession::remote_battle()` (dernière diffusion reçue du
+    // serveur, autoritaire) et tous les clics passent par des requêtes RPC
+    // (`send_placement`/`send_battle_action`) plutôt que d'appeler le
+    // moteur directement — même principe que `WorldScene` pour la position.
+
+    /// Accès à l'autoload `CoopSession`, même pattern que `save_game`/
+    /// `WorldScene::coop_session` : chemin absolu depuis la racine de
+    /// l'arbre de scène.
+    fn coop_session(&self) -> Option<Gd<CoopSession>> {
+        let root = self.base().get_tree().get_root()?;
+        let node = root.get_node_or_null("CoopSession")?;
+        node.try_cast::<CoopSession>().ok()
+    }
+
+    fn coop_battle_snapshot(&self) -> Option<CoopBattleWire> {
+        self.coop_session()?.bind().remote_battle().cloned()
+    }
+
+    /// Appelée chaque frame (`process`) : ne reconstruit l'UI que lorsque
+    /// l'état reçu a effectivement changé, pour éviter de reconstruire les
+    /// boutons de sort à chaque image.
+    fn poll_coop_battle(&mut self) {
+        let current = self.coop_battle_snapshot();
+        if current != self.coop_last {
+            self.coop_last = current;
+            self.refresh_ui();
+        }
+    }
+
+    fn draw_coop_units(&mut self) {
+        let Some(wire) = self.coop_last.clone() else {
+            return;
+        };
+        for unit in &wire.units {
+            if unit.hp <= 0 {
+                continue;
+            }
+            let side = if unit.side == 0 { Side::Player } else { Side::Enemy };
+            let color = match side {
+                Side::Player => Color::from_rgb(0.3, 0.7, 1.0),
+                Side::Enemy => Color::from_rgb(0.9, 0.3, 0.3),
+            };
+            let margin = 8.0;
+            let pos = BoardPos { side, cell: GridPos::new(unit.x, unit.y) };
+            let rect = Rect2::new(
+                cell_screen_pos(pos) + Vector2::new(margin, margin),
+                Vector2::new(CELL - margin * 2.0, CELL - margin * 2.0),
+            );
+            self.base_mut().draw_rect(rect, color);
+        }
+    }
+
+    fn handle_coop_click(&mut self, target: BoardPos) {
+        let Some(wire) = self.coop_last.clone() else {
+            return;
+        };
+        let Some(mut coop) = self.coop_session() else {
+            return;
+        };
+        let local_peer = coop.bind().local_peer_id();
+
+        match &wire.phase {
+            CoopBattlePhaseWire::Placement { .. } => {
+                if target.side != Side::Player {
+                    return;
+                }
+                coop.bind_mut().send_placement(target.cell);
+            }
+            CoopBattlePhaseWire::Fight { current_turn_owner, .. } => {
+                let Some(spell_id) = self.coop_pending_spell.take() else {
+                    return;
+                };
+                if *current_turn_owner != Some(local_peer) {
+                    return;
+                }
+                coop.bind_mut().send_battle_action(&spell_id, target);
+            }
+            CoopBattlePhaseWire::End { .. } => {}
+        }
+    }
+
+    /// Équivalent coop de `refresh_ui` pour la partie solo : construit le
+    /// titre et, si c'est le tour d'un des personnages du joueur local, les
+    /// boutons de sort — à partir de `coop_last` plutôt que de `self.phase`.
+    fn refresh_coop_ui(&mut self) {
+        let Some(wire) = self.coop_last.clone() else {
+            self.set_title("En attente du combat...");
+            return;
+        };
+        let local_peer = self.coop_session().map(|coop| coop.bind().local_peer_id()).unwrap_or(-1);
+
+        match &wire.phase {
+            CoopBattlePhaseWire::Placement { pending_counts } => {
+                let mine = pending_counts.iter().find(|(peer, _)| *peer == local_peer).map(|(_, n)| *n).unwrap_or(0);
+                let text = if mine > 0 {
+                    format!("Placement — clique une case de ton plateau ({mine} restant(s))")
+                } else {
+                    "Placement — en attente des autres joueurs...".to_string()
+                };
+                self.set_title(&text);
+            }
+            CoopBattlePhaseWire::Fight { current_turn_owner, current_unit_name, current_unit_spell_ids } => {
+                if *current_turn_owner == Some(local_peer) {
+                    self.set_title(&format!("À toi de jouer : {current_unit_name}"));
+                    self.build_spell_buttons(current_unit_spell_ids.clone());
+                } else if current_turn_owner.is_some() {
+                    self.set_title(&format!("Tour de {current_unit_name} (coéquipier)"));
+                } else {
+                    self.set_title(&format!("Tour de {current_unit_name} (ennemi)"));
+                }
+            }
+            CoopBattlePhaseWire::End { .. } => {
+                self.set_title("Fin du combat...");
+            }
         }
     }
 }

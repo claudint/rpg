@@ -25,8 +25,11 @@ const TILE_SIZE: f32 = 64.0;
 const MOVE_SPEED: f32 = 8.0;
 /// Case où se trouve le point d'intérêt "ville" (Phase 1 étape 2).
 const TOWN_POS: GridPos = GridPos { x: 6, y: 3 };
-/// Probabilité de déclencher un combat à chaque case parcourue (Phase 1 étape 3).
-const ENCOUNTER_CHANCE: f64 = 0.05;
+/// Probabilité de rencontre par case parcourue (Phase 1 étape 3).
+/// `pub(crate)` : réutilisée par `network::CoopSession`, qui rejoue ce même
+/// jet côté serveur quand la session coop est active (specs section 6,
+/// étape 8).
+pub(crate) const ENCOUNTER_CHANCE: f64 = 0.05;
 
 fn grid_to_pixels(pos: GridPos) -> Vector2 {
     Vector2::new(pos.x as f32 * TILE_SIZE, pos.y as f32 * TILE_SIZE)
@@ -154,16 +157,24 @@ impl WorldScene {
     }
 
     /// Met à jour la case logique du joueur et déclenche l'entrée dans un
-    /// point d'intérêt si la case d'arrivée en contient un.
+    /// point d'intérêt si la case d'arrivée en contient un. En coop, le
+    /// serveur rejoue ce même jet de rencontre (`ENCOUNTER_CHANCE`) dans son
+    /// traitement de `request_move` et diffuse quand un combat démarre — le
+    /// jet local est donc désactivé pour éviter que deux joueurs déclenchent
+    /// chacun leur propre combat indépendamment (specs section 6, étape 8).
     fn arrive_at(&mut self, pos: GridPos) {
         let previous = self.logical_pos;
         self.logical_pos = pos;
         self.notify_coop_move(previous, pos);
         if pos == TOWN_POS {
             self.enter_town();
-        } else if encounter::should_trigger(randf(), ENCOUNTER_CHANCE) {
+        } else if !self.in_coop() && encounter::should_trigger(randf(), ENCOUNTER_CHANCE) {
             self.enter_battle(pos);
         }
+    }
+
+    fn in_coop(&self) -> bool {
+        self.coop_session().is_some_and(|coop| coop.bind().connected())
     }
 
     /// Relaie un déplacement d'une case à la session coop (Phase 3 étape 7).
