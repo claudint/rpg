@@ -1,15 +1,15 @@
 # État d'avancement — RPG tactique
 
-Dernière mise à jour : 2026-08-21. Ce fichier résume où en est le projet
+Dernière mise à jour : 2026-08-23. Ce fichier résume où en est le projet
 pour reprendre le travail dans une nouvelle conversation. Les specs
 complètes restent dans `specs-jeu-rpg-tactique.md`, les conventions dans
 `CLAUDE.md` — les deux à lire avant toute modification importante.
 
-Tout ce qui est décrit ici jusqu'à la Phase 2 est **poussé sur
-`origin/main`** (dernier commit : `d4a8efd`). Le début de la Phase 3
-(comptes joueurs, section suivante) est fait et testé localement, mais
-**pas encore commité** — à valider avec l'utilisateur avant de committer/
-pousser.
+Tout ce qui est décrit ici jusqu'à la Phase 2, plus les comptes joueurs
+(début de Phase 3), est **poussé sur `origin/main`** (dernier commit :
+`410a464`). La synchro coop (fin de Phase 3, section suivante) est faite et
+testée localement (deux clients + serveur headless), mais **pas encore
+commitée** — à valider avec l'utilisateur avant de committer/pousser.
 
 ## Ce qui est fait
 
@@ -108,6 +108,51 @@ retrouver le détail des décisions.
   connexion (autoload global) ; `save`/`load` lancés avant connexion
   échouent silencieusement (401), comme "backend éteint" aujourd'hui.
 
+### Phase 3 (suite) — Synchronisation coop de la carte (specs section 6 étape 7) : fait, pas commité
+
+Plusieurs joueurs se voient bouger en temps réel sur la carte d'exploration.
+Identité réseau volontairement **séparée** des comptes pour cette itération
+(simple pseudo, sans vérification de jeton — décision utilisateur, à relier
+plus tard). Hors scope ici (repoussé à l'étape 8 "combat coop") : combats/
+villes partagés, collision entre joueurs, réconciliation stricte serveur→
+client. Plan complet dans
+`C:\Users\maxen\.claude\plans\linear-soaring-bird.md`.
+
+- **`rust/src/network.rs`** (nouveau, autoload `CoopSession`, présent à
+  l'identique côté client et côté serveur headless) : héberge une partie
+  (`ENetMultiplayerPeer::create_server`, détecté via l'argument `--server`
+  au lancement, ex. `Godot --headless --path rpg -- --server`, port 9000 par
+  défaut) ou en rejoint une (`connect_to`, popup "Coop" dans `WorldScene`).
+  RPC `#[rpc]` : `request_join`/`request_move` (client → serveur, rejoue
+  `world::grid::step` — même logique pure que le solo, aucune duplication)
+  et `sync_state` (serveur → clients, broadcast JSON du roster). Le serveur
+  bascule sur une scène vide (`rpg/scenes/server_root.tscn`) pour ne jamais
+  exécuter `login.tscn` en mode headless.
+- **`rust/src/world/scene.rs`** : bouton de menu "Coop" (popup adresse/port/
+  pseudo), dessin des joueurs distants (rect orange, sans interpolation —
+  simplification volontaire pour cette itération), notifie `CoopSession`
+  après chaque déplacement local.
+- **`rust/src/world/grid.rs`** : `WORLD_BOUNDS` (constante partagée
+  client/serveur, avant codée en dur dans `WorldScene::init`),
+  `Direction::to_code`/`from_code` pour le transport réseau.
+- **Bugs rencontrés et corrigés** :
+  - Appeler `get_unique_id()` sur un `ENetMultiplayerPeer` pas encore
+    connecté fait planter le client en boucle d'erreurs (une par frame).
+    Corrigé en gardant une référence Rust explicite sur le peer
+    (`CoopSession.peer`, sinon gdext pouvait le libérer trop tôt) et en ne
+    touchant plus l'API multiplayer tant que `connected`/`is_server` est
+    faux.
+  - `request_join` initialisait tout nouveau joueur à `(0, 0)` côté serveur
+    quelle que soit sa vraie position (restaurée depuis la sauvegarde) :
+    les joueurs déjà présents le voyaient donc "téléporter" depuis
+    l'origine de la grille jusqu'à sa vraie case au premier déplacement,
+    au lieu de le voir directement à la bonne case en rejoignant. Corrigé
+    en transmettant la position courante du joueur (`WorldScene::logical_pos`)
+    dans `connect_to`/`request_join`, au lieu de la coder en dur.
+- **Testé manuellement** : serveur headless + deux clients fenêtrés
+  (`alice`/`bob`), jointure coop des deux côtés, déplacement d'un joueur
+  visible en temps réel dans l'autre fenêtre, aucune erreur en log.
+
 ## Pour relancer le projet
 
 1. **Backend** : `cd backend-api && cargo run` (nécessite
@@ -122,6 +167,11 @@ retrouver le détail des décisions.
    Lancer avec `D:\logiciel\godot\Godot_v4.7.2-stable_win64.exe --path
    D:\dev\rpg\rpg`, ou en headless avec `--headless --quit-after N` pour
    un test de fumée rapide sans interaction.
+3. **Serveur coop** (optionnel, pour tester la synchro multijoueur) :
+   `D:\logiciel\godot\Godot_v4.7.2-stable_win64.exe --headless --path
+   D:\dev\rpg\rpg -- --server` (port 9000 par défaut). Rejoindre depuis le
+   bouton "Coop" de la carte du monde, dans deux instances du jeu lancées
+   séparément.
 
 ## Pièges déjà rencontrés (évite de les refaire)
 
@@ -141,10 +191,14 @@ retrouver le détail des décisions.
 
 ## Pas encore fait / pistes pour la suite
 
-- **Phase 3 (suite) et Phase 4 des specs (coop temps réel, PvP)** : les
-  comptes joueurs sont faits (voir ci-dessus), mais rien du serveur temps
-  réel (Godot headless + Rust, specs section 4-5), aucune synchronisation de
-  déplacement/combat entre joueurs, pas de matchmaking.
+- **Phase 3 étape 8 et Phase 4 des specs (combat coop, PvP)** : la
+  synchronisation de déplacement (étape 7) est faite (voir ci-dessus), mais
+  rien du combat coop (plusieurs joueurs sur un même plateau de bataille) ni
+  du PvP (matchmaking, combat entre équipes de joueurs humains).
+- **Identité réseau coop non reliée aux comptes** : le pseudo saisi dans le
+  popup "Coop" n'est pas vérifié contre `backend-api` (décision délibérée
+  pour cette itération) — à relier avec le combat coop ou une itération
+  dédiée.
 - **Sélection de composition d'équipe** : `player_characters.selected`
   existe en base mais aucune UI pour la modifier (l'équipe reste la liste
   par défaut codée dans `rust/data/characters.json`).
