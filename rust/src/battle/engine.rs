@@ -32,6 +32,13 @@ pub fn from_combined(pos: GridPos) -> BoardPos {
     }
 }
 
+pub fn opposite(side: Side) -> Side {
+    match side {
+        Side::Player => Side::Enemy,
+        Side::Enemy => Side::Player,
+    }
+}
+
 pub type UnitId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +181,31 @@ impl BattleState {
         let enemy_count = self.units.iter().filter(|u| u.side == Side::Enemy).count() as i32;
         Rewards { xp: enemy_count * XP_PER_ENEMY, gold: enemy_count * GOLD_PER_ENEMY }
     }
+}
+
+/// Décision de l'IA (ennemie en solo, ou joueur sans propriétaire connecté
+/// en coop — voir `battle::coop`) pour le tour de `unit` : son premier sort
+/// connu, visant une case tirée au sort parmi les cibles valides. `roll`
+/// est un paramètre (comme `world::encounter::should_trigger`) plutôt qu'un
+/// appel direct à `randf()`, pour rester testable et partagée entre le
+/// combat solo (`battle::scene`) et le combat coop.
+pub fn choose_ai_action(state: &BattleState, unit: UnitId, roll: f64) -> Option<(String, BoardPos)> {
+    let caster = state.unit(unit);
+    let spell_id = caster.spell_ids.first()?.clone();
+    let spell = state.spell(&spell_id)?;
+    let target_side = match spell.target {
+        TargetKind::Enemy => opposite(caster.side),
+        TargetKind::Ally => caster.side,
+    };
+
+    let candidates: Vec<GridPos> =
+        state.units.iter().filter(|u| u.is_alive() && u.pos.side == target_side).map(|u| u.pos.cell).collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let index = ((roll * candidates.len() as f64) as usize).min(candidates.len() - 1);
+    Some((spell_id, BoardPos { side: target_side, cell: candidates[index] }))
 }
 
 const XP_PER_ENEMY: i32 = 15;
@@ -329,5 +361,26 @@ mod tests {
 
         assert_eq!(hit, vec![1]);
         assert_eq!(state.unit(0).hp, 20); // trop loin de la frontière pour être touché
+    }
+
+    #[test]
+    fn choose_ai_action_targets_the_opposing_side() {
+        let units = vec![
+            unit("Gobelin", Side::Enemy, 0, 0, 15, 5, &["strike"]),
+            unit("Heros", Side::Player, 1, 2, 20, 10, &["strike"]),
+        ];
+        let state = BattleState::new(units, vec![strike_spell()]);
+
+        let (spell_id, target) = choose_ai_action(&state, 0, 0.0).expect("une cible valide existe");
+        assert_eq!(spell_id, "strike");
+        assert_eq!(target, BoardPos { side: Side::Player, cell: GridPos::new(1, 2) });
+    }
+
+    #[test]
+    fn choose_ai_action_none_without_valid_target() {
+        let units = vec![unit("Solitaire", Side::Player, 0, 0, 20, 10, &["strike"])];
+        let state = BattleState::new(units, vec![strike_spell()]);
+
+        assert_eq!(choose_ai_action(&state, 0, 0.0), None);
     }
 }

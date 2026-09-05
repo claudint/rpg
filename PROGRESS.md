@@ -5,11 +5,12 @@ pour reprendre le travail dans une nouvelle conversation. Les specs
 complètes restent dans `specs-jeu-rpg-tactique.md`, les conventions dans
 `CLAUDE.md` — les deux à lire avant toute modification importante.
 
-Tout ce qui est décrit ici jusqu'à la Phase 2, plus les comptes joueurs
-(début de Phase 3), est **poussé sur `origin/main`** (dernier commit :
-`410a464`). La synchro coop (fin de Phase 3, section suivante) est faite et
-testée localement (deux clients + serveur headless), mais **pas encore
-commitée** — à valider avec l'utilisateur avant de committer/pousser.
+Tout ce qui est décrit ici jusqu'à la synchro coop de la carte (Phase 3,
+étape 7 incluse) est **poussé sur `origin/main`** (dernier commit :
+`1cac652`). Le combat coop (Phase 3, étape 8, section suivante) est fait et
+testé localement (deux clients + serveur headless, combat complet jusqu'à
+la victoire), mais **pas encore commité** — à valider avec l'utilisateur
+avant de committer/pousser.
 
 ## Ce qui est fait
 
@@ -153,6 +154,63 @@ client. Plan complet dans
   (`alice`/`bob`), jointure coop des deux côtés, déplacement d'un joueur
   visible en temps réel dans l'autre fenêtre, aucune erreur en log.
 
+### Phase 3 (fin) — Combat coop (specs section 6, étape 8) : fait, pas commité
+
+Plusieurs joueurs placent et jouent chacun leurs propres personnages dans
+un même combat partagé. Décisions utilisateur : chaque joueur ne contrôle
+que le tour de son/ses personnage(s) (pas de contrôle partagé), initiative
+= la stat `speed` déjà existante (rien de nouveau côté moteur), tous les
+joueurs connectés embarquent dans le même combat dès qu'une rencontre se
+déclenche pour l'un d'eux. Le catalogue de personnages reste les 3 mêmes
+(pas d'UI de sélection d'équipe, specs section 9) : répartis en
+round-robin entre les joueurs connectés au moment où le combat démarre
+("un ou plusieurs personnages chacun", specs 3.4 — 2 joueurs → 2+1, 1 seul
+joueur → comportement solo inchangé). Plan complet dans
+`C:\Users\maxen\.claude\plans\linear-soaring-bird.md`.
+
+- **`rust/src/battle/coop.rs`** (nouveau) : `CoopBattle`, orchestration
+  côté serveur — répartition des personnages, file de placement par
+  joueur, validation qu'un joueur n'agit que pour son propre personnage
+  (`act`), relance l'IA (`resolve_ai_turn`) pour les tours ennemis ou
+  d'un joueur déconnecté (`on_disconnect`, ses personnages passent à
+  l'IA). Testable en pur Rust (aucun appel direct à `randf()` : le tirage
+  est un paramètre, comme `world::encounter::should_trigger`).
+- **`rust/src/battle/engine.rs`** : extraction de `choose_ai_action`
+  (déplacée hors de `BattleScene::run_ai_turn`, désormais réutilisée par
+  le solo et le coop — même comportement, aucune duplication).
+- **`rust/src/network.rs`** (`CoopSession` étendu) : le jet de rencontre
+  (`ENCOUNTER_CHANCE`, désormais `pub(crate)` dans `world/scene.rs`) est
+  rejoué côté serveur dans le traitement de `request_move` — évite que
+  deux joueurs déclenchent chacun leur propre combat. Nouveaux RPC
+  `request_place`/`request_battle_action` (client → serveur) et
+  `sync_battle` (serveur → clients, un seul message réutilisé pour
+  placement/combat/fin, même idée que `sync_state` pour la carte). Fin de
+  combat : chaque client applique la même récompense à son propre état
+  local (`session.rs`), pas de logique serveur de répartition — puis
+  retour immédiat à la carte pour tout le monde (pas d'écran de
+  victoire/défaite dédié en coop, contrairement au solo).
+- **`rust/src/battle/scene.rs`** : `BattleScene` distingue solo/coop via
+  `CoopSession` — en solo, comportement **strictement inchangé** ; en
+  coop, l'affichage vient de la dernière diffusion reçue
+  (`CoopSession::remote_battle`) et les clics passent par des requêtes
+  RPC plutôt que d'appeler le moteur localement. Simplifications
+  volontaires pour cette itération : pas d'étiquettes de PV flottantes en
+  coop (juste les rectangles colorés), pas de prévisualisation de zone au
+  survol, bouton "Fuir" masqué (abandon partiel d'un combat partagé non
+  géré).
+- **Limites acceptées** : rejoindre la session coop pendant qu'un combat
+  est déjà en cours n'intègre pas ce joueur au combat (il attend la fin) ;
+  un 4e joueur connecté n'aurait aucun personnage à contrôler (seulement 3
+  fiches existent) ; l'identité réseau coop reste non reliée aux comptes
+  (déjà noté à l'étape précédente).
+- **Testé manuellement de bout en bout** : serveur headless + deux
+  clients (`alice`/`bob`), combat déclenché naturellement (jet aléatoire)
+  pour les deux à la fois, répartition 2/1 des personnages, placement
+  partagé synchronisé, tours alternés avec le bon propriétaire à chaque
+  fois (vérifié y compris le refus d'une tentative de bob hors de son
+  tour), IA ennemie automatique entre les tours, victoire → retour
+  synchronisé des deux clients sur la carte du monde.
+
 ## Pour relancer le projet
 
 1. **Backend** : `cd backend-api && cargo run` (nécessite
@@ -191,10 +249,9 @@ client. Plan complet dans
 
 ## Pas encore fait / pistes pour la suite
 
-- **Phase 3 étape 8 et Phase 4 des specs (combat coop, PvP)** : la
-  synchronisation de déplacement (étape 7) est faite (voir ci-dessus), mais
-  rien du combat coop (plusieurs joueurs sur un même plateau de bataille) ni
-  du PvP (matchmaking, combat entre équipes de joueurs humains).
+- **Phase 4 des specs (PvP)** : la Phase 3 (déplacement + combat coop) est
+  entièrement faite (voir ci-dessus), mais rien du PvP (matchmaking, combat
+  entre équipes de joueurs humains).
 - **Identité réseau coop non reliée aux comptes** : le pseudo saisi dans le
   popup "Coop" n'est pas vérifié contre `backend-api` (décision délibérée
   pour cette itération) — à relier avec le combat coop ou une itération

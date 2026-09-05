@@ -1,5 +1,6 @@
+pub(crate) mod coop;
 mod data;
-mod engine;
+pub(crate) mod engine;
 mod pattern;
 pub(crate) mod scene;
 
