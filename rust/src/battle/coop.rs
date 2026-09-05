@@ -13,6 +13,13 @@
 //! joueurs connectés au moment où le combat démarre — 1 joueur récupère
 //! tout (comportement identique au solo), 2 joueurs se partagent en 2+1,
 //! etc. Pas d'UI de sélection d'équipe pour l'instant (specs section 9).
+//!
+//! Réutilisé tel quel pour le PvP (specs section 6, étape 9-10, "défi 1
+//! contre 1") : un combat PvP est un combat coop où le côté `Side::Enemy`
+//! est peuplé par un adversaire humain (`Opponent::Players`) au lieu de
+//! l'IA (`Opponent::Ai`) — même répartition round-robin, même moteur de
+//! tour/propriété/déconnexion, seul `start`/`start_fight`/`place` avaient
+//! besoin de connaître le côté de chaque joueur (voir `peer_side`).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -42,11 +49,29 @@ enum CoopPhase {
     End { outcome: Outcome, rewards: Option<Rewards> },
 }
 
+/// Adversaire du côté `Side::Enemy` d'un combat coop : l'IA (PvE, existant)
+/// ou un ou plusieurs joueurs humains (PvP, specs section 6, étape 9-10).
+pub(crate) enum Opponent {
+    Ai,
+    Players(Vec<i32>),
+}
+
 pub(crate) struct CoopBattle {
     phase: CoopPhase,
-    /// Propriétaire (peer_id) de chaque unité côté joueur. Absent de la map
-    /// = IA (ennemi, ou personnage dont le joueur s'est déconnecté).
+    /// Propriétaire (peer_id) de chaque unité, une fois le combat commencé
+    /// (`CoopPhase::Fight`/`End`). Absent de la map = IA (ennemi, ou
+    /// personnage dont le joueur s'est déconnecté).
     owners: HashMap<UnitId, i32>,
+    /// Côté (`Side::Player` ou `Side::Enemy`) sur lequel chaque joueur
+    /// place ses personnages, valable pour toute la durée du combat. En
+    /// PvE, toujours `Side::Player` pour tout le monde. En PvP, le
+    /// challenger est sur `Side::Player`, le défenseur sur `Side::Enemy`.
+    peer_side: HashMap<i32, Side>,
+    /// Vrai en PvE (le côté `Side::Enemy` est rempli par
+    /// `data::default_enemy_roster()` une fois le placement terminé), faux
+    /// en PvP (le côté `Side::Enemy` vient déjà de `placed`, comme
+    /// `Side::Player`).
+    ai_enemies: bool,
 }
 
 /// Un personnage à afficher côté client, indépendant de la représentation
@@ -64,7 +89,13 @@ pub(crate) struct CoopUnitSnapshot {
 }
 
 pub(crate) enum CoopPhaseSnapshot {
-    Placement { pending_counts: HashMap<i32, usize> },
+    Placement {
+        pending_counts: HashMap<i32, usize>,
+        /// Plateau attribué à chaque joueur (voir `CoopBattle::peer_side`).
+        /// Toujours `Side::Player` pour tout le monde en PvE ; distingue
+        /// challenger/défenseur en PvP.
+        sides: HashMap<i32, Side>,
+    },
     Fight {
         current_turn_owner: Option<i32>,
         /// Nom/sorts de l'unité dont c'est le tour, pour que le client
@@ -82,27 +113,39 @@ pub(crate) struct CoopSnapshot {
 }
 
 impl CoopBattle {
-    /// Démarre un combat pour `connected_peers`, en répartissant le
-    /// catalogue de personnages en round-robin entre eux.
-    pub(crate) fn start(connected_peers: &[i32]) -> Self {
-        let mut pending: HashMap<i32, VecDeque<data::UnitDef>> =
-            connected_peers.iter().map(|&peer| (peer, VecDeque::new())).collect();
+    /// Démarre un combat pour `player_peers` (côté `Side::Player`), en
+    /// répartissant le catalogue de personnages en round-robin entre eux ;
+    /// `opponent` détermine qui peuple `Side::Enemy` — l'IA (PvE) ou une
+    /// seconde répartition round-robin d'un jeu indépendant du même
+    /// catalogue entre des joueurs adverses (PvP).
+    pub(crate) fn start(player_peers: &[i32], opponent: Opponent) -> Self {
+        let mut pending: HashMap<i32, VecDeque<data::UnitDef>> = HashMap::new();
+        let mut peer_side: HashMap<i32, Side> = HashMap::new();
+        round_robin_into(&mut pending, &mut peer_side, player_peers, Side::Player);
 
-        if !connected_peers.is_empty() {
-            for (i, def) in data::default_player_roster().into_iter().enumerate() {
-                let peer = connected_peers[i % connected_peers.len()];
-                pending.get_mut(&peer).expect("peer initialisé ci-dessus").push_back(def);
+        let ai_enemies = match &opponent {
+            Opponent::Ai => true,
+            Opponent::Players(enemy_peers) => {
+                round_robin_into(&mut pending, &mut peer_side, enemy_peers, Side::Enemy);
+                false
             }
-        }
+        };
 
-        Self { phase: CoopPhase::Placement { pending, placed: Vec::new() }, owners: HashMap::new() }
+        Self {
+            phase: CoopPhase::Placement { pending, placed: Vec::new() },
+            owners: HashMap::new(),
+            peer_side,
+            ai_enemies,
+        }
     }
 
-    /// `peer_id` place son prochain personnage en attente sur `cell` (son
-    /// propre plateau). Quand tout le monde a fini de placer, bascule
-    /// automatiquement en combat (ajoute les ennemis, comme
-    /// `BattleScene::start_fight` en solo).
+    /// `peer_id` place son prochain personnage en attente sur `cell`, sur
+    /// le plateau qui lui est attribué (`peer_side`). Quand tout le monde a
+    /// fini de placer, bascule automatiquement en combat — ajoute les
+    /// ennemis IA en PvE (comme `BattleScene::start_fight` en solo), ou
+    /// rien de plus en PvP (les deux camps viennent déjà de `placed`).
     pub(crate) fn place(&mut self, peer_id: i32, cell: GridPos) -> Result<(), &'static str> {
+        let side = *self.peer_side.get(&peer_id).ok_or("joueur inconnu de ce combat")?;
         let CoopPhase::Placement { pending, placed } = &mut self.phase else {
             return Err("pas en phase de placement");
         };
@@ -110,12 +153,12 @@ impl CoopBattle {
         if queue.is_empty() {
             return Err("plus rien à placer pour ce joueur");
         }
-        if placed.iter().any(|(unit, _)| unit.pos.cell == cell) {
+        if placed.iter().any(|(unit, _)| unit.pos.cell == cell && unit.pos.side == side) {
             return Err("case déjà occupée");
         }
 
         let def = queue.pop_front().expect("file non vide, vérifié ci-dessus");
-        let unit = def.into_unit(Side::Player, BoardPos { side: Side::Player, cell });
+        let unit = def.into_unit(side, BoardPos { side, cell });
         placed.push((unit, peer_id));
 
         if pending.values().all(VecDeque::is_empty) {
@@ -135,9 +178,11 @@ impl CoopBattle {
             owners.insert(units.len(), peer);
             units.push(unit);
         }
-        for (i, def) in data::default_enemy_roster().into_iter().enumerate() {
-            let cell = GridPos::new(1, i as i32);
-            units.push(def.into_unit(Side::Enemy, BoardPos { side: Side::Enemy, cell }));
+        if self.ai_enemies {
+            for (i, def) in data::default_enemy_roster().into_iter().enumerate() {
+                let cell = GridPos::new(1, i as i32);
+                units.push(def.into_unit(Side::Enemy, BoardPos { side: Side::Enemy, cell }));
+            }
         }
 
         self.owners = owners;
@@ -205,10 +250,21 @@ impl CoopBattle {
     fn check_outcome(&mut self) {
         if let CoopPhase::Fight { battle } = &self.phase {
             if let Some(outcome) = battle.outcome() {
-                let rewards = (outcome == Outcome::Victory).then(|| battle.victory_rewards());
+                // Pas d'économie en PvP (specs section 6, étape 9-10) :
+                // `victory_rewards()` calcule XP/argent à partir du camp
+                // adverse défait, ce qui n'a de sens que face à l'IA.
+                let rewards = (outcome == Outcome::Victory && self.ai_enemies).then(|| battle.victory_rewards());
                 self.phase = CoopPhase::End { outcome, rewards };
             }
         }
+    }
+
+    /// Vrai si le côté `Side::Enemy` de ce combat est un adversaire humain
+    /// (`Opponent::Players`) plutôt que l'IA — utile côté serveur pour
+    /// savoir si un tirage de butin a un sens (voir
+    /// `network::CoopSession::drive_and_broadcast_battle`).
+    pub(crate) fn is_pvp(&self) -> bool {
+        !self.ai_enemies
     }
 
     pub(crate) fn outcome(&self) -> Option<Outcome> {
@@ -236,6 +292,7 @@ impl CoopBattle {
             CoopPhase::Placement { pending, placed } => CoopSnapshot {
                 phase: CoopPhaseSnapshot::Placement {
                     pending_counts: pending.iter().map(|(&peer, queue)| (peer, queue.len())).collect(),
+                    sides: self.peer_side.clone(),
                 },
                 units: placed
                     .iter()
@@ -288,6 +345,30 @@ impl CoopBattle {
     }
 }
 
+/// Distribue un jeu indépendant de `data::default_player_roster()` en
+/// round-robin entre `peers`, sur `side` — factorisé pour être appelé une
+/// fois par camp (`Side::Player` toujours, `Side::Enemy` en plus en PvP).
+/// No-op si `peers` est vide (PvE sans joueur connecté : ne devrait pas
+/// arriver, mais `CoopBattle::start` reste sûr dans ce cas).
+fn round_robin_into(
+    pending: &mut HashMap<i32, VecDeque<data::UnitDef>>,
+    peer_side: &mut HashMap<i32, Side>,
+    peers: &[i32],
+    side: Side,
+) {
+    for &peer in peers {
+        pending.entry(peer).or_default();
+        peer_side.insert(peer, side);
+    }
+    if peers.is_empty() {
+        return;
+    }
+    for (i, def) in data::default_player_roster().into_iter().enumerate() {
+        let peer = peers[i % peers.len()];
+        pending.get_mut(&peer).expect("peer initialisé ci-dessus").push_back(def);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,14 +379,14 @@ mod tests {
 
     #[test]
     fn round_robin_distributes_all_characters_with_one_peer() {
-        let battle = CoopBattle::start(&[1]);
+        let battle = CoopBattle::start(&[1], Opponent::Ai);
         let CoopPhase::Placement { pending, .. } = &battle.phase else { panic!("attendu Placement") };
         assert_eq!(pending.get(&1).unwrap().len(), data::default_player_roster().len());
     }
 
     #[test]
     fn round_robin_splits_between_two_peers() {
-        let battle = CoopBattle::start(&[1, 2]);
+        let battle = CoopBattle::start(&[1, 2], Opponent::Ai);
         let CoopPhase::Placement { pending, .. } = &battle.phase else { panic!("attendu Placement") };
         let total = pending.get(&1).unwrap().len() + pending.get(&2).unwrap().len();
         assert_eq!(total, data::default_player_roster().len());
@@ -316,7 +397,7 @@ mod tests {
 
     #[test]
     fn placement_transitions_to_fight_once_everyone_is_done() {
-        let mut battle = CoopBattle::start(&[1]);
+        let mut battle = CoopBattle::start(&[1], Opponent::Ai);
         let roster_len = data::default_player_roster().len();
         for i in 0..roster_len {
             battle.place(1, GridPos::new(0, i as i32)).unwrap();
@@ -326,7 +407,7 @@ mod tests {
 
     #[test]
     fn a_player_cannot_act_for_someone_elses_unit() {
-        let mut battle = CoopBattle::start(&[1, 2]);
+        let mut battle = CoopBattle::start(&[1, 2], Opponent::Ai);
         let roster_len = data::default_player_roster().len();
         for i in 0..roster_len {
             // peer_id qui possède réellement le prochain personnage en attente
@@ -354,7 +435,7 @@ mod tests {
 
     #[test]
     fn disconnect_mid_fight_hands_unit_to_ai() {
-        let mut battle = CoopBattle::start(&[1]);
+        let mut battle = CoopBattle::start(&[1], Opponent::Ai);
         let roster_len = data::default_player_roster().len();
         for i in 0..roster_len {
             battle.place(1, GridPos::new(0, i as i32)).unwrap();
@@ -364,5 +445,74 @@ mod tests {
         battle.on_disconnect(1);
         assert!(battle.owners.is_empty());
         assert!(battle.needs_ai_turn() || battle.outcome().is_some());
+    }
+
+    // --- PvP (specs section 6, étape 9-10) : Opponent::Players ---
+
+    #[test]
+    fn pvp_distributes_a_full_independent_roster_to_each_side() {
+        let battle = CoopBattle::start(&[1], Opponent::Players(vec![2]));
+        let CoopPhase::Placement { pending, .. } = &battle.phase else { panic!("attendu Placement") };
+        let roster_len = data::default_player_roster().len();
+        assert_eq!(pending.get(&1).unwrap().len(), roster_len);
+        assert_eq!(pending.get(&2).unwrap().len(), roster_len);
+        assert_eq!(battle.peer_side.get(&1), Some(&Side::Player));
+        assert_eq!(battle.peer_side.get(&2), Some(&Side::Enemy));
+    }
+
+    #[test]
+    fn pvp_placement_on_the_same_cell_on_both_boards_does_not_collide() {
+        let mut battle = CoopBattle::start(&[1], Opponent::Players(vec![2]));
+        // Même case (0,0), mais sur deux plateaux différents : ne doit pas
+        // se refuser mutuellement (contrairement à un vrai conflit sur le
+        // même plateau, déjà couvert par le comportement existant).
+        battle.place(1, GridPos::new(0, 0)).unwrap();
+        battle.place(2, GridPos::new(0, 0)).unwrap();
+    }
+
+    #[test]
+    fn pvp_transitions_to_fight_without_ai_roster() {
+        let mut battle = CoopBattle::start(&[1], Opponent::Players(vec![2]));
+        let roster_len = data::default_player_roster().len();
+        for i in 0..roster_len {
+            battle.place(1, GridPos::new(0, i as i32)).unwrap();
+            battle.place(2, GridPos::new(0, i as i32)).unwrap();
+        }
+        let CoopPhase::Fight { battle: state } = &battle.phase else { panic!("attendu Fight") };
+        // Les deux camps viennent uniquement des joueurs (pas d'IA en plus).
+        assert_eq!(state.units.len(), roster_len * 2);
+        assert!(battle.owners.values().all(|&owner| owner == 1 || owner == 2));
+    }
+
+    #[test]
+    fn pvp_defender_cannot_act_for_challengers_unit() {
+        let mut battle = CoopBattle::start(&[1], Opponent::Players(vec![2]));
+        let roster_len = data::default_player_roster().len();
+        for i in 0..roster_len {
+            battle.place(1, GridPos::new(0, i as i32)).unwrap();
+            battle.place(2, GridPos::new(0, i as i32)).unwrap();
+        }
+        let CoopPhase::Fight { battle: state } = &battle.phase else { unreachable!() };
+        let current = state.current_unit_id();
+        let real_owner = *battle.owners.get(&current).unwrap();
+        let impostor = if real_owner == 1 { 2 } else { 1 };
+
+        let target = BoardPos { side: engine::opposite(if real_owner == 1 { Side::Player } else { Side::Enemy }), cell: GridPos::new(0, 0) };
+        let result = battle.act(impostor, strike_spell_ids()[0], target);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pvp_disconnect_hands_defenders_units_to_ai() {
+        let mut battle = CoopBattle::start(&[1], Opponent::Players(vec![2]));
+        let roster_len = data::default_player_roster().len();
+        for i in 0..roster_len {
+            battle.place(1, GridPos::new(0, i as i32)).unwrap();
+            battle.place(2, GridPos::new(0, i as i32)).unwrap();
+        }
+        assert!(battle.owners.values().any(|&owner| owner == 2));
+
+        battle.on_disconnect(2);
+        assert!(battle.owners.values().all(|&owner| owner != 2));
     }
 }

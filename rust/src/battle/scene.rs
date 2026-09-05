@@ -740,8 +740,13 @@ impl BattleScene {
         let local_peer = coop.bind().local_peer_id();
 
         match &wire.phase {
-            CoopBattlePhaseWire::Placement { .. } => {
-                if target.side != Side::Player {
+            CoopBattlePhaseWire::Placement { sides, .. } => {
+                // Plateau attribué au joueur local (specs section 6, étape
+                // 9-10, PvP) : toujours `Side::Player` en coop PvE, peut
+                // être `Side::Enemy` pour le défenseur d'un duel PvP.
+                let expected = sides.iter().find(|(peer, _)| *peer == local_peer).map(|(_, s)| *s == 1);
+                let target_is_enemy_side = target.side == Side::Enemy;
+                if expected != Some(target_is_enemy_side) {
                     return;
                 }
                 coop.bind_mut().send_placement(target.cell);
@@ -770,7 +775,7 @@ impl BattleScene {
         let local_peer = self.coop_session().map(|coop| coop.bind().local_peer_id()).unwrap_or(-1);
 
         match &wire.phase {
-            CoopBattlePhaseWire::Placement { pending_counts } => {
+            CoopBattlePhaseWire::Placement { pending_counts, .. } => {
                 let mine = pending_counts.iter().find(|(peer, _)| *peer == local_peer).map(|(_, n)| *n).unwrap_or(0);
                 let text = if mine > 0 {
                     format!("Placement — clique une case de ton plateau ({mine} restant(s))")

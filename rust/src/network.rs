@@ -23,7 +23,7 @@ use godot::global::randf;
 use godot::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::battle::coop::{CoopBattle, CoopPhaseSnapshot, CoopSnapshot};
+use crate::battle::coop::{CoopBattle, CoopPhaseSnapshot, CoopSnapshot, Opponent};
 use crate::battle::engine::{self, BoardPos, Outcome, Side};
 use crate::session;
 use crate::world::encounter;
@@ -60,7 +60,14 @@ pub(crate) struct CoopBattleUnitWire {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum CoopBattlePhaseWire {
-    Placement { pending_counts: Vec<(i32, usize)> },
+    Placement {
+        pending_counts: Vec<(i32, usize)>,
+        /// Plateau (0 = `Side::Player`, 1 = `Side::Enemy`) attribué à
+        /// chaque joueur — toujours 0 pour tout le monde en coop PvE,
+        /// distingue challenger/défenseur en PvP (voir
+        /// `battle::coop::CoopBattle::peer_side`).
+        sides: Vec<(i32, u8)>,
+    },
     Fight { current_turn_owner: Option<i32>, current_unit_name: String, current_unit_spell_ids: Vec<String> },
     End { victory: bool, xp: i32, gold: i32, loot: Option<String> },
 }
@@ -101,8 +108,31 @@ pub struct CoopSession {
     battle: Option<CoopBattle>,
     /// Dernier état de combat reçu du serveur (client uniquement). Sa seule
     /// présence indique qu'un combat coop est affiché : `BattleScene` lit ce
-    /// champ plutôt que de gérer un `BattleState` local.
+    /// champ plutôt que de gérer un `BattleState` local. Utilisé aussi bien
+    /// pour le coop PvE que pour le PvP (specs section 6, étape 9-10) : les
+    /// deux partagent le même format de diffusion, `BattleScene` n'a pas
+    /// besoin de savoir lequel c'est.
     remote_battle: Option<CoopBattleWire>,
+    /// Défis PvP en attente de réponse (serveur uniquement) : challenger →
+    /// cible. Un défi disparaît quand il est accepté, refusé, ou qu'un des
+    /// deux joueurs se déconnecte (voir `on_peer_disconnected`).
+    pending_pvp_challenges: HashMap<i32, i32>,
+    /// Défi PvP reçu par le joueur local, en attente de sa réponse (client
+    /// uniquement) : peer_id + pseudo du challenger. Lu par le popup Coop
+    /// de `WorldScene`.
+    incoming_pvp_challenge: Option<(i32, String)>,
+    /// Peer_id du joueur que j'ai défié, en attente de sa réponse (client
+    /// uniquement) : lu par le popup Coop pour afficher "en attente de
+    /// réponse..." plutôt que le bouton "Défier". Effacé sur refus
+    /// (`notify_pvp_declined`) ou dès qu'un nouveau combat démarre.
+    outgoing_pvp_challenge: Option<i32>,
+    /// Côté (`Side::Player` = 0, `Side::Enemy` = 1) sur lequel se trouvent
+    /// mes propres unités dans le combat en cours (client uniquement) :
+    /// mémorisé dès qu'un `sync_battle` reçu contient une de mes unités.
+    /// Toujours `Some(0)` en pratique en coop PvE ; distingue
+    /// challenger/défenseur en PvP, pour interpréter correctement
+    /// `victory` (absolu, relatif à `Side::Player`) à la fin du combat.
+    local_side: Option<u8>,
 }
 
 #[godot_api]
@@ -118,6 +148,10 @@ impl INode for CoopSession {
             peer: None,
             battle: None,
             remote_battle: None,
+            pending_pvp_challenges: HashMap::new(),
+            incoming_pvp_challenge: None,
+            outgoing_pvp_challenge: None,
+            local_side: None,
         }
     }
 
@@ -227,6 +261,11 @@ impl CoopSession {
         self.roster.remove(&peer_id);
         self.broadcast_state();
 
+        // Défis PvP fantômes (specs section 6, étape 9-10) : un défi
+        // impliquant le joueur qui vient de partir n'a plus de sens, dans
+        // un sens comme dans l'autre.
+        self.pending_pvp_challenges.retain(|&challenger, &mut target| challenger != peer_id && target != peer_id);
+
         let has_battle = if let Some(battle) = &mut self.battle {
             battle.on_disconnect(peer_id);
             true
@@ -270,6 +309,48 @@ impl CoopSession {
     /// unités du combat lui appartiennent (`CoopBattleUnitWire::owner`).
     pub fn local_peer_id(&self) -> i32 {
         self.base().get_multiplayer().map(|mp| mp.get_unique_id()).unwrap_or(0)
+    }
+
+    /// Joueurs connectés (peer_id + pseudo), pour que le popup Coop de
+    /// `WorldScene` propose un bouton "Défier" par joueur (le joueur local
+    /// exclu, même filtre que `other_players`).
+    pub fn connected_peers(&self) -> Vec<(i32, String)> {
+        let local_id = self.local_peer_id();
+        self.roster.values().filter(|player| player.peer_id != local_id).map(|player| (player.peer_id, player.name.clone())).collect()
+    }
+
+    /// Défi PvP reçu, en attente d'une réponse du joueur local (specs
+    /// section 6, étape 9-10). Lu par le popup Coop pour afficher
+    /// "<nom> te défie !".
+    pub fn incoming_pvp_challenge(&self) -> Option<(i32, String)> {
+        self.incoming_pvp_challenge.clone()
+    }
+
+    /// Peer_id du joueur défié, tant qu'aucune réponse n'a été reçue. Lu
+    /// par le popup Coop pour remplacer son bouton "Défier" par un état
+    /// d'attente.
+    pub fn outgoing_pvp_challenge(&self) -> Option<i32> {
+        self.outgoing_pvp_challenge
+    }
+
+    /// Défie `target_peer` en duel PvP (popup Coop). Refusée silencieusement
+    /// par le serveur si un combat est déjà en cours ou qu'un défi est déjà
+    /// en attente pour l'un des deux joueurs (voir `request_pvp_challenge`).
+    pub fn send_pvp_challenge(&mut self, target_peer: i32) {
+        self.outgoing_pvp_challenge = Some(target_peer);
+        let _ = self.rpcs().request_pvp_challenge(target_peer).call_id(1);
+    }
+
+    /// Répond à un défi PvP reçu (`incoming_pvp_challenge`). `accept` faux
+    /// = refus, `challenger_peer` doit correspondre à
+    /// `incoming_pvp_challenge().0`.
+    pub fn respond_pvp_challenge(&mut self, challenger_peer: i32, accept: bool) {
+        self.incoming_pvp_challenge = None;
+        if accept {
+            let _ = self.rpcs().request_pvp_accept(challenger_peer).call_id(1);
+        } else {
+            let _ = self.rpcs().request_pvp_decline(challenger_peer).call_id(1);
+        }
     }
 
     /// Demande au serveur de placer le prochain personnage en attente du
@@ -377,7 +458,16 @@ impl CoopSession {
             return;
         }
         godot_print!("CoopSession: combat coop déclenché pour {} joueur(s)", peers.len());
-        self.battle = Some(CoopBattle::start(&peers));
+        self.battle = Some(CoopBattle::start(&peers, Opponent::Ai));
+        self.broadcast_battle(None);
+    }
+
+    /// Démarre un duel PvP 1 contre 1 entre `challenger` et `defender`
+    /// (specs section 6, étape 9-10), après acceptation du défi. Réutilise
+    /// le même pipeline de diffusion/pilotage que le coop PvE.
+    fn start_pvp_battle(&mut self, challenger: i32, defender: i32) {
+        godot_print!("CoopSession: duel PvP entre {challenger} et {defender}");
+        self.battle = Some(CoopBattle::start(&[challenger], Opponent::Players(vec![defender])));
         self.broadcast_battle(None);
     }
 
@@ -413,6 +503,79 @@ impl CoopSession {
         self.drive_and_broadcast_battle();
     }
 
+    /// `sender` défie `target_peer` en duel PvP (specs section 6, étape
+    /// 9-10). Refusée si la cible n'est pas connue de la session, si un
+    /// combat (coop ou PvP) est déjà en cours, ou si l'un des deux joueurs
+    /// a déjà un défi en attente.
+    #[rpc(any_peer, reliable)]
+    fn request_pvp_challenge(&mut self, target_peer: i32) {
+        let Some(multiplayer) = self.base().get_multiplayer() else {
+            return;
+        };
+        let sender = multiplayer.get_remote_sender_id();
+        if self.battle.is_some() || sender == target_peer {
+            return;
+        }
+        let Some(target_name) = self.roster.get(&target_peer).map(|p| p.name.clone()) else {
+            return;
+        };
+        let Some(challenger_name) = self.roster.get(&sender).map(|p| p.name.clone()) else {
+            return;
+        };
+        let already_pending = self.pending_pvp_challenges.iter().any(|(&c, &t)| c == sender || t == sender || c == target_peer || t == target_peer);
+        if already_pending {
+            return;
+        }
+
+        godot_print!("CoopSession: {challenger_name} défie {target_name} en PvP");
+        self.pending_pvp_challenges.insert(sender, target_peer);
+        let name = GString::from(&challenger_name);
+        let _ = self.rpcs().notify_pvp_challenge(sender, &name).call_id(target_peer as i64);
+    }
+
+    #[rpc(authority, reliable)]
+    fn notify_pvp_challenge(&mut self, challenger_peer: i32, challenger_name: GString) {
+        self.incoming_pvp_challenge = Some((challenger_peer, challenger_name.to_string()));
+    }
+
+    /// `sender` accepte un défi PvP reçu de `challenger_peer`. Démarre le
+    /// duel si le défi est toujours valide et qu'aucun combat n'est déjà en
+    /// cours (un défi accepté en retard, pendant qu'un autre combat a
+    /// démarré entre-temps, est simplement ignoré).
+    #[rpc(any_peer, reliable)]
+    fn request_pvp_accept(&mut self, challenger_peer: i32) {
+        let Some(multiplayer) = self.base().get_multiplayer() else {
+            return;
+        };
+        let sender = multiplayer.get_remote_sender_id();
+        if self.pending_pvp_challenges.get(&challenger_peer) != Some(&sender) {
+            return;
+        }
+        self.pending_pvp_challenges.remove(&challenger_peer);
+        if self.battle.is_some() {
+            return;
+        }
+        self.start_pvp_battle(challenger_peer, sender);
+    }
+
+    #[rpc(any_peer, reliable)]
+    fn request_pvp_decline(&mut self, challenger_peer: i32) {
+        let Some(multiplayer) = self.base().get_multiplayer() else {
+            return;
+        };
+        let sender = multiplayer.get_remote_sender_id();
+        if self.pending_pvp_challenges.get(&challenger_peer) != Some(&sender) {
+            return;
+        }
+        self.pending_pvp_challenges.remove(&challenger_peer);
+        let _ = self.rpcs().notify_pvp_declined().call_id(challenger_peer as i64);
+    }
+
+    #[rpc(authority, reliable)]
+    fn notify_pvp_declined(&mut self) {
+        self.outgoing_pvp_challenge = None;
+    }
+
     /// Rejoue les tours IA en attente (ennemis, ou personnages dont le
     /// joueur s'est déconnecté) puis diffuse l'état résultant à tous les
     /// clients. Appelée après chaque placement/action qui a réellement
@@ -429,8 +592,9 @@ impl CoopSession {
         // Le butin a besoin d'un tirage aléatoire (Godot) : décidé ici,
         // seule fois où la transition Fight -> End vient d'avoir lieu,
         // plutôt que dans `battle::coop` qui reste sans dépendance à Godot.
+        // Pas de butin en PvP (pas d'économie, voir `CoopBattle::is_pvp`).
         let just_ended = was_ongoing && battle.outcome().is_some();
-        let loot = if just_ended && battle.outcome() == Some(Outcome::Victory) {
+        let loot = if just_ended && !battle.is_pvp() && battle.outcome() == Some(Outcome::Victory) {
             let index = ((randf() * engine::LOOT_TABLE.len() as f64) as usize).min(engine::LOOT_TABLE.len() - 1);
             Some(engine::LOOT_TABLE[index].to_string())
         } else {
@@ -463,14 +627,30 @@ impl CoopSession {
             return;
         };
 
+        // Mémorise sur quel plateau se trouvent mes unités, tant qu'il y en
+        // a dans cette diffusion (Placement une fois que j'ai placé, ou
+        // Fight — toujours peuplé). Nécessaire pour interpréter `victory`
+        // correctement à la fin d'un duel PvP (voir plus bas).
+        let local_peer = self.local_peer_id();
+        if let Some(unit) = wire.units.iter().find(|u| u.owner == Some(local_peer)) {
+            self.local_side = Some(unit.side);
+        }
+
         if let CoopBattlePhaseWire::End { victory, xp, gold, loot } = &wire.phase {
-            self.apply_coop_battle_end(*victory, *xp, *gold, loot.clone());
+            // `victory` vient du serveur relatif à `Side::Player` (voir
+            // `engine::BattleState::outcome`) : à retourner pour le
+            // défenseur d'un duel PvP, placé sur `Side::Enemy`. Toujours
+            // `Side::Player` en coop PvE, donc sans effet dans ce cas.
+            let my_victory = if self.local_side == Some(1) { !*victory } else { *victory };
+            self.apply_coop_battle_end(my_victory, *xp, *gold, loot.clone());
             return;
         }
 
         let is_new_battle = self.remote_battle.is_none();
         self.remote_battle = Some(wire);
         if is_new_battle {
+            self.incoming_pvp_challenge = None;
+            self.outgoing_pvp_challenge = None;
             let mut tree = self.base().get_tree();
             let path = Variant::from(GString::from("res://scenes/battle.tscn"));
             tree.call_deferred("change_scene_to_file", &[path]);
@@ -486,6 +666,7 @@ impl CoopSession {
     /// joueur sur un combat partagé.
     fn apply_coop_battle_end(&mut self, victory: bool, xp: i32, gold: i32, loot: Option<String>) {
         self.remote_battle = None;
+        self.local_side = None;
 
         if victory {
             let known = crate::battle::known_loot_items();
@@ -536,9 +717,10 @@ impl CoopSession {
 
 fn to_battle_wire(snapshot: &CoopSnapshot, loot: Option<String>) -> CoopBattleWire {
     let phase = match &snapshot.phase {
-        CoopPhaseSnapshot::Placement { pending_counts } => {
-            CoopBattlePhaseWire::Placement { pending_counts: pending_counts.iter().map(|(&p, &c)| (p, c)).collect() }
-        }
+        CoopPhaseSnapshot::Placement { pending_counts, sides } => CoopBattlePhaseWire::Placement {
+            pending_counts: pending_counts.iter().map(|(&p, &c)| (p, c)).collect(),
+            sides: sides.iter().map(|(&p, &s)| (p, if s == Side::Player { 0 } else { 1 })).collect(),
+        },
         CoopPhaseSnapshot::Fight { current_turn_owner, current_unit_name, current_unit_spell_ids } => {
             CoopBattlePhaseWire::Fight {
                 current_turn_owner: *current_turn_owner,

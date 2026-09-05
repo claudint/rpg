@@ -1,16 +1,17 @@
 # État d'avancement — RPG tactique
 
-Dernière mise à jour : 2026-08-23. Ce fichier résume où en est le projet
+Dernière mise à jour : 2026-09-05. Ce fichier résume où en est le projet
 pour reprendre le travail dans une nouvelle conversation. Les specs
 complètes restent dans `specs-jeu-rpg-tactique.md`, les conventions dans
 `CLAUDE.md` — les deux à lire avant toute modification importante.
 
-Tout ce qui est décrit ici jusqu'à la synchro coop de la carte (Phase 3,
-étape 7 incluse) est **poussé sur `origin/main`** (dernier commit :
-`1cac652`). Le combat coop (Phase 3, étape 8, section suivante) est fait et
-testé localement (deux clients + serveur headless, combat complet jusqu'à
-la victoire), mais **pas encore commité** — à valider avec l'utilisateur
-avant de committer/pousser.
+Tout ce qui est décrit ici jusqu'au combat coop (Phase 3, étape 8 incluse)
+est **poussé et mergé sur `origin/main`** (dernier commit : `5561863`) — la
+Phase 3 est donc entièrement terminée. Le PvP (Phase 4, section suivante)
+est fait, `cargo test`/`cargo build` propres, mais **pas encore testé en
+conditions réelles ni commité** — sur la branche `feat/pvp-battle`, laissé à
+l'utilisateur pour le test manuel (deux clients + serveur) avant de
+committer/pousser.
 
 ## Ce qui est fait
 
@@ -72,7 +73,7 @@ Postgres 15 et voulait éviter une réécriture au moment du multijoueur :
   contrairement à un fichier local). Sauvegarde automatique après une
   victoire, bouton "Sauvegarder", commandes console `save`/`load`.
 
-### Phase 3 — Multijoueur, comptes joueurs (specs section 6 étape 7, début) : fait, pas commité
+### Phase 3 — Multijoueur, comptes joueurs (specs section 6 étape 7, début) : mergé sur `main`
 
 Première brique avant tout déplacement/combat synchronisé : le jeu sait
 maintenant distinguer les joueurs (avant, tout était câblé en dur sur
@@ -109,7 +110,7 @@ retrouver le détail des décisions.
   connexion (autoload global) ; `save`/`load` lancés avant connexion
   échouent silencieusement (401), comme "backend éteint" aujourd'hui.
 
-### Phase 3 (suite) — Synchronisation coop de la carte (specs section 6 étape 7) : fait, pas commité
+### Phase 3 (suite) — Synchronisation coop de la carte (specs section 6 étape 7) : mergé sur `main`
 
 Plusieurs joueurs se voient bouger en temps réel sur la carte d'exploration.
 Identité réseau volontairement **séparée** des comptes pour cette itération
@@ -154,7 +155,7 @@ client. Plan complet dans
   (`alice`/`bob`), jointure coop des deux côtés, déplacement d'un joueur
   visible en temps réel dans l'autre fenêtre, aucune erreur en log.
 
-### Phase 3 (fin) — Combat coop (specs section 6, étape 8) : fait, pas commité
+### Phase 3 (fin) — Combat coop (specs section 6, étape 8) : mergé sur `main`
 
 Plusieurs joueurs placent et jouent chacun leurs propres personnages dans
 un même combat partagé. Décisions utilisateur : chaque joueur ne contrôle
@@ -211,6 +212,72 @@ joueur → comportement solo inchangé). Plan complet dans
   tour), IA ennemie automatique entre les tours, victoire → retour
   synchronisé des deux clients sur la carte du monde.
 
+### Phase 4 — PvP, défi 1 contre 1 (specs section 6, étapes 9-10) : sur `feat/pvp-battle`, pas encore testé en conditions réelles
+
+Deux joueurs s'affrontent au lieu de jouer contre l'IA. Décisions
+utilisateur : défi **1 contre 1** uniquement pour cette itération (une
+équipe = un seul joueur, avec ses 3 personnages, comme en solo — pas de
+répartition multi-joueurs par équipe, extensible plus tard), déclenché
+par un bouton "Défier" dans le popup "Coop" déjà existant, l'autre joueur
+devant accepter avant que le combat démarre. Plan complet dans
+`C:\Users\maxen\.claude\plans\linear-soaring-bird.md`.
+
+- **Pas de nouveau module** : `battle::coop::CoopBattle` était déjà
+  largement générique (propriété/tours/déconnexion sans hypothèse
+  "l'adversaire est l'IA"). Généralisé plutôt que dupliqué :
+  - `Opponent::{Ai, Players(Vec<i32>)}` en paramètre de `CoopBattle::start`
+    — `Ai` reproduit le comportement PvE existant à l'identique,
+    `Players` répartit un **second** jeu indépendant du même catalogue de
+    personnages en round-robin sur le camp adverse (`Side::Enemy`), tenu
+    par des joueurs humains au lieu de l'IA.
+  - Nouveau champ `peer_side` (qui place sur quel plateau) : corrige au
+    passage une vérification anti-collision au placement qui ignorait le
+    côté (sans effet observable en PvE, nécessaire dès que les deux
+    plateaux sont peuplés par des joueurs).
+  - Pas d'économie PvP (XP/argent/loot) : `check_outcome` ne calcule des
+    récompenses que si l'adversaire est l'IA ; côté serveur, le tirage de
+    butin est sauté pour un combat marqué PvP (`CoopBattle::is_pvp`).
+- **`rust/src/network.rs`** (`CoopSession` étendu) : nouveaux RPC
+  `request_pvp_challenge`/`notify_pvp_challenge`/`request_pvp_accept`/
+  `request_pvp_decline`/`notify_pvp_declined` pour le défi et sa réponse.
+  Le duel démarré réutilise **exactement** le pipeline de diffusion déjà
+  écrit pour le coop PvE (`sync_battle`/`remote_battle`) — aucun nouveau
+  message réseau pour afficher le combat lui-même, `BattleScene` ne fait
+  aucune différence entre un combat coop et un duel PvP. Un seul combat
+  actif à la fois pour toute la session (coop ou PvP), comme c'était déjà
+  le cas pour le coop. Nouveau champ `local_side`, mémorisé côté client
+  dès qu'une diffusion contient une de mes unités : sert à retourner
+  `victory` (calculé côté serveur relatif à `Side::Player`) pour le
+  défenseur d'un duel, placé sur `Side::Enemy`.
+- **`rust/src/battle/scene.rs`** : un seul point de correction — le clic de
+  placement n'acceptait que `Side::Player` en dur ; lit désormais le
+  plateau attribué au joueur local (`sides`, nouveau champ de
+  `CoopBattlePhaseWire::Placement`) pour accepter aussi bien le
+  challenger que le défenseur. Le reste du rendu/de l'UI coop (déjà
+  générique par propriétaire) s'applique tel quel, y compris le bouton
+  "Fuir" déjà masqué.
+- **`rust/src/world/scene.rs`** : popup "Coop" étendu — liste des joueurs
+  connectés avec un bouton "Défier" par ligne (capturée à l'ouverture du
+  popup, pas mise à jour en direct si le roster change entre-temps), et
+  une ligne d'état de défi (entrant avec Accepter/Refuser, ou "en attente
+  de réponse...") mise à jour à chaque frame tant que le popup reste
+  ouvert.
+- **Limites acceptées pour cette itération** : 1 contre 1 seulement (pas
+  d'équipes multi-joueurs par camp) ; un défi n'est visible que si le
+  popup Coop est ouvert au bon moment (pas de notification globale sur la
+  carte), pas de timeout de défi (nettoyé seulement à la déconnexion d'un
+  des deux joueurs) ; le défenseur voit sa propre équipe affichée du côté
+  "adverse" (rouge) de l'écran de combat — cosmétique, sans impact sur le
+  fonctionnement ; un adversaire déconnecté en cours de duel passe à l'IA
+  (même mécanisme que le coéquipier déconnecté en coop) plutôt qu'une
+  victoire par forfait explicite ; historique de combat
+  (`session::record_battle`) partagé avec le PvE sans distinction.
+- **Testé** : `cargo test` (33/33, dont 6 nouveaux tests PvP dans
+  `battle/coop.rs`), `cargo build` propre. **Pas de session de test manuel
+  GUI cette fois** (retour utilisateur : trop lent en faisant les tests
+  moi-même) — laissé à l'utilisateur pour vérifier en conditions réelles
+  (deux clients + serveur) avant de committer/pousser.
+
 ## Pour relancer le projet
 
 1. **Backend** : `cd backend-api && cargo run` (nécessite
@@ -249,9 +316,11 @@ joueur → comportement solo inchangé). Plan complet dans
 
 ## Pas encore fait / pistes pour la suite
 
-- **Phase 4 des specs (PvP)** : la Phase 3 (déplacement + combat coop) est
-  entièrement faite (voir ci-dessus), mais rien du PvP (matchmaking, combat
-  entre équipes de joueurs humains).
+- **Phase 4 des specs (PvP)** : le défi 1 contre 1 est fait (voir
+  ci-dessus, branche `feat/pvp-battle`, pas encore testé/mergé), mais pas
+  les équipes multi-joueurs par camp ("1 à 4 joueurs par équipe", specs
+  3.4) ni les duels/combats simultanés (un seul combat actif à la fois
+  pour toute la session, coop ou PvP confondus).
 - **Identité réseau coop non reliée aux comptes** : le pseudo saisi dans le
   popup "Coop" n'est pas vérifié contre `backend-api` (décision délibérée
   pour cette itération) — à relier avec le combat coop ou une itération

@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 
 use godot::classes::{
-    Button, ColorRect, HSeparator, InputEvent, InputEventKey, InputEventMouseButton, Label, LineEdit,
+    Button, ColorRect, HBoxContainer, HSeparator, InputEvent, InputEventKey, InputEventMouseButton, Label, LineEdit,
     ScrollContainer, VBoxContainer,
 };
 use godot::global::{randf, Key, MouseButton};
@@ -50,6 +50,12 @@ pub struct WorldScene {
     /// Vrai pendant qu'un popup (ex. récompense de victoire) est affiché :
     /// on ignore alors les entrées de déplacement.
     input_blocked: bool,
+    /// Ligne d'état des défis PvP (specs section 6, étape 9-10) dans le
+    /// popup Coop, mise à jour à chaque frame tant que le popup est ouvert
+    /// (voir `process`) : texte + boutons Accepter/Refuser, créés une seule
+    /// fois à l'ouverture du popup plutôt que reconstruits dynamiquement,
+    /// puisqu'un seul défi entrant à la fois est possible.
+    coop_challenge_row: Option<(Gd<Label>, Gd<Button>, Gd<Button>)>,
 }
 
 #[godot_api]
@@ -68,6 +74,7 @@ impl INode2D for WorldScene {
             visual_pos: grid_to_pixels(start),
             move_queue: VecDeque::new(),
             input_blocked: false,
+            coop_challenge_row: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl INode2D for WorldScene {
     fn process(&mut self, delta: f64) {
         self.advance_visual_position(delta as f32);
         self.base_mut().queue_redraw();
+        self.poll_coop_challenge();
     }
 
     fn unhandled_input(&mut self, event: Gd<InputEvent>) {
@@ -497,17 +505,20 @@ impl WorldScene {
         }
     }
 
-    /// Popup pour rejoindre une partie coop (Phase 3 étape 7) : mêmes
+    /// Popup pour rejoindre une partie coop (Phase 3 étape 7), et défier un
+    /// joueur connecté en PvP (specs section 6, étape 9-10) : mêmes
     /// scaffolding que `open_list_popup`/`show_reward_popup`, avec des
     /// `LineEdit` pré-remplis au lieu de simples `Label`.
     fn open_coop_popup(&mut self) {
+        let connected = self.coop_session().is_some_and(|coop| coop.bind().connected());
+
         let mut backdrop = ColorRect::new_alloc();
         backdrop.set_size(self.base().get_viewport_rect().size);
         backdrop.set_color(Color::from_rgba(0.0, 0.0, 0.0, 0.55));
 
         let mut panel = ColorRect::new_alloc();
         panel.set_position(Vector2::new(100.0, 60.0));
-        panel.set_size(Vector2::new(360.0, 420.0));
+        panel.set_size(Vector2::new(380.0, 620.0));
         panel.set_color(Color::from_rgb(0.15, 0.15, 0.2));
         backdrop.add_child(&panel);
 
@@ -546,6 +557,108 @@ impl WorldScene {
         close_button.set_text("Fermer");
         backdrop.add_child(&close_button);
 
+        let mut separator = HSeparator::new_alloc();
+        separator.set_position(Vector2::new(120.0, 380.0));
+        separator.set_size(Vector2::new(340.0, 8.0));
+        backdrop.add_child(&separator);
+
+        let mut pvp_label = Label::new_alloc();
+        pvp_label.set_position(Vector2::new(120.0, 396.0));
+        pvp_label.set_text(if connected { "Joueurs connectés — défier en PvP" } else { "Rejoins une partie pour défier d'autres joueurs" });
+        backdrop.add_child(&pvp_label);
+
+        // Liste des joueurs connectés (specs section 6, étape 9-10) :
+        // capturée à l'ouverture du popup, pas mise à jour en direct si le
+        // roster change pendant que le popup est ouvert (limite acceptée,
+        // voir le plan — seule la ligne de défi ci-dessous est vivante).
+        let mut scroll = ScrollContainer::new_alloc();
+        scroll.set_position(Vector2::new(120.0, 424.0));
+        scroll.set_size(Vector2::new(340.0, 100.0));
+        backdrop.add_child(&scroll);
+
+        let mut list = VBoxContainer::new_alloc();
+        list.set_custom_minimum_size(Vector2::new(320.0, 0.0));
+        scroll.add_child(&list);
+
+        let players = self.coop_session().map(|coop| coop.bind().connected_peers()).unwrap_or_default();
+        if connected && players.is_empty() {
+            let mut empty_label = Label::new_alloc();
+            empty_label.set_text("(personne d'autre pour l'instant)");
+            list.add_child(&empty_label);
+        }
+        for (peer_id, name) in players {
+            let mut row = HBoxContainer::new_alloc();
+            let mut name_label = Label::new_alloc();
+            name_label.set_custom_minimum_size(Vector2::new(220.0, 0.0));
+            name_label.set_text(&name);
+            row.add_child(&name_label);
+
+            let mut challenge_button = Button::new_alloc();
+            challenge_button.set_text("Défier");
+            row.add_child(&challenge_button);
+
+            let mut this = self.to_gd();
+            let callable = Callable::from_fn("challenge_pvp", move |_args: &[&Variant]| {
+                if let Some(mut coop) = this.bind_mut().coop_session() {
+                    coop.bind_mut().send_pvp_challenge(peer_id);
+                }
+                Variant::nil()
+            });
+            challenge_button.connect("pressed", &callable);
+
+            list.add_child(&row);
+        }
+
+        // Ligne d'état des défis (entrant ou envoyé), créée une seule fois
+        // ici puis mise à jour à chaque frame tant que le popup est ouvert
+        // (voir `poll_coop_challenge`, appelée depuis `process`).
+        let mut challenge_label = Label::new_alloc();
+        challenge_label.set_position(Vector2::new(120.0, 536.0));
+        challenge_label.set_size(Vector2::new(340.0, 32.0));
+        backdrop.add_child(&challenge_label);
+
+        let mut accept_button = Button::new_alloc();
+        accept_button.set_position(Vector2::new(120.0, 570.0));
+        accept_button.set_size(Vector2::new(100.0, 32.0));
+        accept_button.set_text("Accepter");
+        accept_button.set_visible(false);
+        backdrop.add_child(&accept_button);
+
+        let mut decline_button = Button::new_alloc();
+        decline_button.set_position(Vector2::new(230.0, 570.0));
+        decline_button.set_size(Vector2::new(100.0, 32.0));
+        decline_button.set_text("Refuser");
+        decline_button.set_visible(false);
+        backdrop.add_child(&decline_button);
+
+        let mut this = self.to_gd();
+        let accept_callable = Callable::from_fn("accept_pvp_challenge", move |_args: &[&Variant]| {
+            let this_bind = this.bind_mut();
+            let Some(mut coop) = this_bind.coop_session() else { return Variant::nil() };
+            let challenger = coop.bind().incoming_pvp_challenge().map(|(peer, _)| peer);
+            drop(this_bind);
+            if let Some(challenger) = challenger {
+                coop.bind_mut().respond_pvp_challenge(challenger, true);
+            }
+            Variant::nil()
+        });
+        accept_button.connect("pressed", &accept_callable);
+
+        let mut this = self.to_gd();
+        let decline_callable = Callable::from_fn("decline_pvp_challenge", move |_args: &[&Variant]| {
+            let this_bind = this.bind_mut();
+            let Some(mut coop) = this_bind.coop_session() else { return Variant::nil() };
+            let challenger = coop.bind().incoming_pvp_challenge().map(|(peer, _)| peer);
+            drop(this_bind);
+            if let Some(challenger) = challenger {
+                coop.bind_mut().respond_pvp_challenge(challenger, false);
+            }
+            Variant::nil()
+        });
+        decline_button.connect("pressed", &decline_callable);
+
+        self.coop_challenge_row = Some((challenge_label.clone(), accept_button.clone(), decline_button.clone()));
+
         self.base_mut().add_child(&backdrop);
         self.input_blocked = true;
 
@@ -560,7 +673,9 @@ impl WorldScene {
             let name = name_handle.get_text().to_string();
             this.bind_mut().join_coop(address, port, name);
             backdrop_handle.queue_free();
-            this.bind_mut().input_blocked = false;
+            let mut this_bind = this.bind_mut();
+            this_bind.input_blocked = false;
+            this_bind.coop_challenge_row = None;
             Variant::nil()
         });
         join_button.connect("pressed", &join_callable);
@@ -569,10 +684,47 @@ impl WorldScene {
         let mut backdrop_handle = backdrop.clone();
         let close_callable = Callable::from_fn("close_coop_popup", move |_args: &[&Variant]| {
             backdrop_handle.queue_free();
-            this.bind_mut().input_blocked = false;
+            let mut this_bind = this.bind_mut();
+            this_bind.input_blocked = false;
+            this_bind.coop_challenge_row = None;
             Variant::nil()
         });
         close_button.connect("pressed", &close_callable);
+    }
+
+    /// Met à jour la ligne de défi PvP du popup Coop tant qu'il est ouvert
+    /// (`coop_challenge_row` créée par `open_coop_popup`) : affiche le défi
+    /// entrant avec Accepter/Refuser, ou "en attente de réponse" pour un
+    /// défi qu'on vient d'envoyer, ou rien. Limite acceptée (specs section
+    /// 6, étape 9-10) : un défi n'est visible que si le popup est ouvert.
+    fn poll_coop_challenge(&mut self) {
+        let Some((mut label, mut accept, mut decline)) = self.coop_challenge_row.clone() else {
+            return;
+        };
+        let Some(coop) = self.coop_session() else {
+            return;
+        };
+
+        let incoming = coop.bind().incoming_pvp_challenge();
+        if let Some((_, name)) = incoming {
+            label.set_text(&format!("{name} te défie !"));
+            accept.set_visible(true);
+            decline.set_visible(true);
+            return;
+        }
+        accept.set_visible(false);
+        decline.set_visible(false);
+
+        let outgoing = coop.bind().outgoing_pvp_challenge();
+        if let Some(target_peer) = outgoing {
+            let name = coop.bind().connected_peers().into_iter().find(|(peer, _)| *peer == target_peer).map(|(_, n)| n);
+            match name {
+                Some(name) => label.set_text(&format!("En attente de réponse de {name}...")),
+                None => label.set_text(""),
+            }
+        } else {
+            label.set_text("");
+        }
     }
 }
 
